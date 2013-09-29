@@ -11,3 +11,4 @@ https://github.com/alibaba/ali_kernel.
 And what's more, since it is used to build rpms and have to be stable, this repo may not be updated frequently like we do in github.com/alibaba/ali_kernel. The rpm you build and installed from repo is almost the same as what we have used now in the production system.
 
 Please refer to rpm/README about how to build the rpm successfully.
+master is the rpm for RHEL5/CentOS5 users, if you are RHEL6/CentOS6 users, please use branch 6u.
