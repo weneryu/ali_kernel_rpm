@@ -1,0 +1,53 @@
+Subject: [PATCH 4/4] Quota: hide system.subtree xattr from the containers
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline:  never
+References: 
+
+
+Since all the users in the containers are not allowed to set disk quotas,
+it doesn't make sense to operate the xattr for them. We just simply return
+nothing if the xattr operations are called in the non-root namespaces.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/fs/ext3/subtree.c b/fs/ext3/subtree.c
+index b27a98b..fe8492e 100644
+
+Acked-by: 
+
+--- a/fs/ext3/subtree.c
++++ b/fs/ext3/subtree.c
+@@ -212,6 +212,10 @@ static size_t
+ ext3_xattr_subtree_list(struct inode *inode, char *list, size_t list_size,
+ 			const char *name, size_t name_len)
+ {
++	/* try to make the users believe there are not such xattr at all */
++	if (in_noninit_pid_ns(current->nsproxy->pid_ns))
++		return 0;
++
+ 	if (list && XATTR_SUBTREE_LEN <= list_size)
+ 		memcpy(list, XATTR_SUBTREE, XATTR_SUBTREE_LEN);
+ 	return XATTR_SUBTREE_LEN;
+@@ -227,6 +231,11 @@ ext3_xattr_subtree_get(struct inode *inode, const char *name,
+ 
+ 	if (strcmp(name, "") != 0)
+ 		return -EINVAL;
++
++	/* try to make the users believe there are not such xattr at all */
++	if (in_noninit_pid_ns(current->nsproxy->pid_ns))
++		return -EOPNOTSUPP;
++
+ 	ret = ext3_subtree_xattr_read(inode, &subtree);
+ 	if (ret)
+ 		return ret;
+@@ -244,7 +253,10 @@ ext3_xattr_subtree_set(struct inode *inode, const char *name,
+ 	char buf[11];
+ 	if (strcmp(name, "") != 0 || size + 1 > sizeof(buf))
+ 		return -EINVAL;
+-		
++	/* try to make the users believe there are not such xattr at all */
++	if (in_noninit_pid_ns(current->nsproxy->pid_ns))
++		return -EOPNOTSUPP;
++
+ 	memcpy(buf, (char *)value, size);
+ 	buf[size] = '\0';
+ 	if (strict_strtoul(buf, 10, &new_subtree))

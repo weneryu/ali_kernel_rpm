@@ -1,0 +1,79 @@
+From 8c4c49df5cfeb8d56e5b85a430c8cbcb86c2ac37 Mon Sep 17 00:00:00 2001
+From: Amerigo Wang <amwang@redhat.com>
+Date: Mon, 17 Sep 2012 20:16:31 +0000
+Subject: [PATCH] netpoll: call ->ndo_select_queue() in tx path
+Patch-mainline: 8c4c49df
+References: 
+
+In netpoll tx path, we miss the chance of calling ->ndo_select_queue(),
+thus could cause problems when bonding is involved.
+
+This patch makes dev_pick_tx() extern (and rename it to netdev_pick_tx())
+to let netpoll call it in netpoll_send_skb_on_dev().
+
+Reported-by: Sylvain Munaut <s.munaut@whatever-company.com>
+Cc: "David S. Miller" <davem@davemloft.net>
+Cc: Eric Dumazet <edumazet@google.com>
+Signed-off-by: Cong Wang <amwang@redhat.com>
+Tested-by: Sylvain Munaut <s.munaut@whatever-company.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off--by: Tao Ma <boyu.mt@taobao.com>
+Acked-by: Li Yu <bingtian.ly@taobao.com>
+
+---
+ include/linux/netdevice.h |    3 +++
+ net/core/dev.c            |    6 +++---
+ net/core/netpoll.c        |    2 +-
+ 3 files changed, 7 insertions(+), 4 deletions(-)
+
+Index: linux-2.6.32-220.23.2.el6/include/linux/netdevice.h
+===================================================================
+--- linux-2.6.32-220.23.2.el6.orig/include/linux/netdevice.h	2013-08-20 01:24:26.000000000 +0800
++++ linux-2.6.32-220.23.2.el6/include/linux/netdevice.h	2013-08-20 01:24:35.000000000 +0800
+@@ -1243,6 +1243,9 @@
+ 		f(dev, &dev->_tx[i], arg);
+ }
+ 
++extern struct netdev_queue *netdev_pick_tx(struct net_device *dev,
++					   struct sk_buff *skb);
++
+ /*
+  * Net namespace inlines
+  */
+Index: linux-2.6.32-220.23.2.el6/net/core/dev.c
+===================================================================
+--- linux-2.6.32-220.23.2.el6.orig/net/core/dev.c	2013-08-20 01:24:35.000000000 +0800
++++ linux-2.6.32-220.23.2.el6/net/core/dev.c	2013-08-20 01:24:35.000000000 +0800
+@@ -1989,8 +1989,8 @@
+ 	return queue_index;
+ }
+ 
+-static struct netdev_queue *dev_pick_tx(struct net_device *dev,
+-					struct sk_buff *skb)
++struct netdev_queue *netdev_pick_tx(struct net_device *dev,
++				    struct sk_buff *skb)
+ {
+ 	int queue_index;
+ 	const struct net_device_ops *ops = dev->netdev_ops;
+@@ -2126,7 +2126,7 @@
+ 	 */
+ 	rcu_read_lock_bh();
+ 
+-	txq = dev_pick_tx(dev, skb);
++	txq = netdev_pick_tx(dev, skb);
+ 	q = rcu_dereference(txq->qdisc);
+ 
+ #ifdef CONFIG_NET_CLS_ACT
+Index: linux-2.6.32-220.23.2.el6/net/core/netpoll.c
+===================================================================
+--- linux-2.6.32-220.23.2.el6.orig/net/core/netpoll.c	2013-08-20 01:24:26.000000000 +0800
++++ linux-2.6.32-220.23.2.el6/net/core/netpoll.c	2013-08-20 01:24:35.000000000 +0800
+@@ -314,7 +314,7 @@
+ 		struct netdev_queue *txq;
+ 		unsigned long flags;
+ 
+-		txq = netdev_get_tx_queue(dev, skb_get_queue_mapping(skb));
++		txq = netdev_pick_tx(dev, skb);
+ 
+ 		local_irq_save(flags);
+ 		/* try until next clock tick */

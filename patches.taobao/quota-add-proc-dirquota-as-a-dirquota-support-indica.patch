@@ -1,0 +1,94 @@
+From 9d1c6ff3d6cac4079669983f3b83fc9389ab3364 Mon Sep 17 00:00:00 2001
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Date: Tue, 11 Dec 2012 13:43:20 +0800
+Subject: [PATCH] quota: add /proc/dirquota as a dirquota support indicator
+Patch-mainline: never
+References: 
+
+It's unnature to see whether a t4kernel supports dirquota, so we
+add /proc/dirquota as an indicator.
+If this entry exists and it contains "1" (no newline at the ending),
+this kernel supports dirquota.
+If this entry doesn't exist or though it exists but contains "0", this
+kernel doesn't support dirquota.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Acked-by: 
+
+---
+ fs/quota/dquot.c      |   32 +++++++++++++++++++++++++++++++-
+ include/linux/quota.h |    1 +
+ 2 files changed, 32 insertions(+), 1 deletions(-)
+
+diff --git a/fs/quota/dquot.c b/fs/quota/dquot.c
+index a2b78dd..a36b746 100644
+--- a/fs/quota/dquot.c
++++ b/fs/quota/dquot.c
+@@ -79,6 +79,8 @@
+ #include <linux/writeback.h> /* for inode_lock, oddly enough.. */
+ 
+ #include <asm/uaccess.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
+ 
+ /*
+  * There are three quota SMP locks. dq_list_lock protects all lists with quotas
+@@ -2626,6 +2628,26 @@ static ctl_table sys_table[] = {
+ 	{ .ctl_name = 0 },
+ };
+ 
++#ifdef CONFIG_SUBTREE
++static int subtree_proc_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "1");
++	return 0;
++}
++
++static int subtree_proc_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, subtree_proc_show, NULL);
++}
++
++static const struct file_operations subtree_proc_fops = {
++	.open		=	subtree_proc_open,
++	.read		=	seq_read,
++	.llseek		=	seq_lseek,
++	.release	=	single_release,
++};
++#endif
++
+ static int __init dquot_init(void)
+ {
+ 	int i;
+@@ -2663,7 +2685,15 @@ static int __init dquot_init(void)
+ 			nr_hash, order, (PAGE_SIZE << order));
+ 
+ 	register_shrinker(&dqcache_shrinker);
+-
++#ifdef CONFIG_SUBTREE
++	{
++		struct proc_dir_entry *pe;
++		pe = proc_create(SUBTREE_PROC_ENTRY, 0444, NULL, &subtree_proc_fops);
++		if (!pe)
++			printk(KERN_WARNING "Cannot create /proc/dirquota, detecting \
++					dirquota support may fail\n");
++	}
++#endif
+ 	return 0;
+ }
+ module_init(dquot_init);
+diff --git a/include/linux/quota.h b/include/linux/quota.h
+index bdb7106..df1e027 100644
+--- a/include/linux/quota.h
++++ b/include/linux/quota.h
+@@ -55,6 +55,7 @@
+ #define SBTR_QUOTA_SHIFT	24
+ #define SBTR_MIN_ID		(1 << SBTR_QUOTA_SHIFT)
+ #define IS_SBTR_ID(id)  (((id) >= SBTR_MIN_ID || (id) == 0) ? 1 : 0)
++#define SUBTREE_PROC_ENTRY "dirquota"
+ 
+ /*
+  * Command definitions for the 'quotactl' system call.
+-- 
+1.7.4.1
+

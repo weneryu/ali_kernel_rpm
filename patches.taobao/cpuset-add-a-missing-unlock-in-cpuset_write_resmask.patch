@@ -1,0 +1,43 @@
+From: Li Zefan <lizf@cn.fujitsu.com>
+Subject: [PATCH] cpuset: add a missing unlock in cpuset_write_resmask()
+Patch-mainline: yes
+References: 
+
+Don't forget to release cgroup_mutex if alloc_trial_cpuset() fails.
+
+[akpm@linux-foundation.org: avoid multiple return points]
+Signed-off-by: Li Zefan <lizf@cn.fujitsu.com>
+Cc: Paul Menage <menage@google.com>
+Acked-by: David Rientjes <rientjes@google.com>
+Cc: Miao Xie <miaox@cn.fujitsu.com>
+Cc: <stable@kernel.org>
+Signed-off-by: Andrew Morton <akpm@linux-foundation.org>
+Signed-off-by: Linus Torvalds <torvalds@linux-foundation.org>
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index 74057ee..8936fca 100644
+
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -1554,8 +1554,10 @@ static int cpuset_write_resmask(struct cgroup *cgrp, struct cftype *cft,
+ 		return -ENODEV;
+ 
+ 	trialcs = alloc_trial_cpuset(cs);
+-	if (!trialcs)
+-		return -ENOMEM;
++	if (!trialcs) {
++		retval = -ENOMEM;
++		goto out;
++	}
+ 
+ 	switch (cft->private) {
+ 	case FILE_CPULIST:
+@@ -1570,6 +1572,7 @@ static int cpuset_write_resmask(struct cgroup *cgrp, struct cftype *cft,
+ 	}
+ 
+ 	free_trial_cpuset(trialcs);
++out:
+ 	cgroup_unlock();
+ 	return retval;
+ }

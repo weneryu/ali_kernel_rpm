@@ -1,0 +1,102 @@
+From 0312815b6bf5364ec3526b2153411a0b04c83f07 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Fri, 1 Jun 2012 18:14:39 +0800
+Subject: [PATCH 5/9] Compute group's steal time
+Patch-mainline: never
+References: 
+
+The patch computes steal time, which we define as time cpu working
+for others. When group is created, we record the per-cpu usr/sys time
+as a baseline.
+Steal time = current usr+sys time - baseline - my usr+sys time.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ include/linux/kernel_stat.h |    1 +
+ kernel/sched.c              |   34 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 35 insertions(+), 0 deletions(-)
+
+diff --git a/include/linux/kernel_stat.h b/include/linux/kernel_stat.h
+index 6383912..07e076e 100644
+--- a/include/linux/kernel_stat.h
++++ b/include/linux/kernel_stat.h
+@@ -27,6 +27,7 @@ enum cpu_usage_stat {
+ 	CPUTIME_IOWAIT,
+ 	CPUTIME_IOWAIT_BASE,
+ 	CPUTIME_STEAL,
++	CPUTIME_STEAL_BASE,
+ 	CPUTIME_GUEST,
+ 	NR_STATS,
+ };
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 58248de..1e612f4 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -11513,6 +11513,13 @@ static struct cgroup_subsys_state *cpuacct_create(
+ 					kcpustat_cpu(i).cpustat[CPUTIME_IDLE];
+ 		kcpustat->cpustat[CPUTIME_IOWAIT_BASE] =
+ 					kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT];
++		kcpustat->cpustat[CPUTIME_STEAL_BASE] =
++				kcpustat_cpu(i).cpustat[CPUTIME_USER]
++				+ kcpustat_cpu(i).cpustat[CPUTIME_NICE]
++				+ kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM]
++				+ kcpustat_cpu(i).cpustat[CPUTIME_IRQ]
++				+ kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ]
++				+ kcpustat_cpu(i).cpustat[CPUTIME_GUEST];
+ 	}
+ 
+ 	return &ca->css;
+@@ -11687,6 +11694,19 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
+ 			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
+ 			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
++			steal = kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
++				- kcpustat->cpustat[CPUTIME_USER]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_NICE]
++				- kcpustat->cpustat[CPUTIME_NICE]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SYSTEM]
++				- kcpustat->cpustat[CPUTIME_SYSTEM]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_IRQ]
++				- kcpustat->cpustat[CPUTIME_IRQ]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SOFTIRQ]
++				- kcpustat->cpustat[CPUTIME_SOFTIRQ]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_GUEST]
++				- kcpustat->cpustat[CPUTIME_GUEST]
++				-  kcpustat->cpustat[CPUTIME_STEAL_BASE];
+ 		}
+ 	} else {
+ 		for_each_online_cpu(cpu) {
+@@ -11696,6 +11716,19 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
+ 			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
+ 			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
++			steal = kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
++				- kcpustat->cpustat[CPUTIME_USER]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_NICE]
++				- kcpustat->cpustat[CPUTIME_NICE]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SYSTEM]
++				- kcpustat->cpustat[CPUTIME_SYSTEM]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_IRQ]
++				- kcpustat->cpustat[CPUTIME_IRQ]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SOFTIRQ]
++				- kcpustat->cpustat[CPUTIME_SOFTIRQ]
++				+ kcpustat_cpu(cpu).cpustat[CPUTIME_GUEST]
++				- kcpustat->cpustat[CPUTIME_GUEST]
++				- kcpustat->cpustat[CPUTIME_STEAL_BASE];
+ 		}
+ 	}
+ 
+@@ -11706,6 +11739,7 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 	cb->fill(cb, "iowait", cputime64_to_clock_t(iowait));
+ 	cb->fill(cb, "irq", cputime64_to_clock_t(irq));
+ 	cb->fill(cb, "softirq", cputime64_to_clock_t(softirq));
++	cb->fill(cb, "steal", cputime64_to_clock_t(steal));
+ 	cb->fill(cb, "guest", cputime64_to_clock_t(guest));
+ 
+ 	return 0;
+-- 
+1.7.1
+

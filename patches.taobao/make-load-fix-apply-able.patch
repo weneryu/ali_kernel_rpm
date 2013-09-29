@@ -1,0 +1,72 @@
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Subject: Make the 4th loadavg fix applyable
+Patch-mainline: never
+References: 
+
+This is just to make the 4th loadavg patch applyable, it does not contains
+any meaningful changes.
+We need this because there were some unclean patches against the git
+tree which made the codes different between dev git tree and t4kernel.git
+
+You have no need to look into this patch at all.
+
+Acked-by: 
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+
+--- old/kernel/sched.c	2012-12-06 14:26:52.026441828 +0800
++++ new/kernel/sched.c	2012-12-06 19:22:10.041102888 +0800
+@@ -3183,7 +3183,7 @@
+ static long calc_load_fold_active(struct rq *this_rq)
+ {
+ 	long nr_active, delta = 0;
+-
++	
+ 	nr_active = this_rq->nr_running;
+ 	nr_active += (long) this_rq->nr_uninterruptible;
+ 
+@@ -3207,7 +3207,7 @@
+ #ifdef CONFIG_NO_HZ
+ /*
+  * For NO_HZ we delay the active fold to the next LOAD_FREQ update.
+- *
++ * 
+  * When making the ILB scale, we should try to pull this in as well.
+  */
+ static atomic_long_t calc_load_tasks_idle;
+@@ -3215,7 +3215,7 @@
+ static void calc_load_account_idle(struct rq *this_rq)
+ {
+ 	long delta;
+-
++	
+ 	delta = calc_load_fold_active(this_rq);
+ 	if (delta)
+ 		atomic_long_add(delta, &calc_load_tasks_idle);
+@@ -3333,15 +3333,15 @@
+ 	 * Catch-up, fold however many we are behind still
+ 	 */
+ 	delta = jiffies - calc_load_update - 10;
+-	n = 1 + (delta / LOAD_FREQ);
++	n = 1 + (delta / LOAD_FREQ);	
+ 
+ 	active = atomic_long_read(&calc_load_tasks);
+ 	active = active > 0 ? active * FIXED_1 : 0;
+-
++	
+ 	avenrun[0] = calc_load_n(avenrun[0], EXP_1, active, n);
+ 	avenrun[1] = calc_load_n(avenrun[1], EXP_5, active, n);
+ 	avenrun[2] = calc_load_n(avenrun[2], EXP_15, active, n);
+-
++		
+ 	calc_load_update += n * LOAD_FREQ;
+ }
+ #else
+@@ -5881,7 +5881,7 @@
+ 	 * Account one period with whatever state we found before
+ 	 * folding in the nohz state and ageing the entire idle period.
+ 	 *
+-	 * This avoids loosing a sample when we go idle between
++	 * This avoids loosing a sample when we go idle between 
+ 	 * calc_load_account_active() (10 ticks ago) and now and thus
+ 	 * under-accounting.
+ 	 */

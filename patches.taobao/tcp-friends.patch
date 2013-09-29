@@ -1,0 +1,1537 @@
+Subject: tcp friends
+From: "Bruce \"Brutus\" Curtis" <brutus@google.com>
+Patch-mainline: soon
+References: 
+
+TCP/IP loopback socket pair stack bypass, based on an idea by, and
+rough upstream patch from, David Miller <davem@davemloft.net> called
+"friends", the data structure modifcations and connection scheme are
+reused with extensive data-path changes.
+
+A new sysctl, net.ipv4.tcp_friends, is added:
+  0: disable friends and use the stock data path.
+  1: enable friends and bypass the stack data path, the default.
+
+Note, when friends is enabled any loopback interpose, e.g. tcpdump,
+will only see the TCP/IP packets during connection establishment and
+finish, all data bypasses the stack and instead is delivered to the
+destination socket directly.
+
+Testing done on a 4 socket 2.2GHz "Quad-Core AMD Opteron(tm) Processor
+8354 CPU" based system, netperf results for a single connection show
+increased TCP_STREAM throughput, increased TCP_RR and TCP_CRR transaction
+rate for most message sizes vs baseline and comparable to AF_UNIX.
+
+Significant increase (up to 5x) in aggregate throughput for multiple
+netperf runs (STREAM 32KB I/O x N) is seen.
+
+Some results:
+
+Default netperf: netperf
+                 netperf -t STREAM_STREAM
+                 netperf -t STREAM_STREAM -- -s 51882 -m 16384 -M 87380
+                 netperf
+
+         Baseline  AF_UNIX      AF_UNIX           Friends
+         Mbits/S   Mbits/S      Mbits/S           Mbits/S
+           6860       714   8%    9444 138% 1323%  10576 154% 1481% 112%
+
+Note, for the AF_UNIX (STREAM_STREAM) test 2 results are listed, 1st
+with no options but as the defaults for AF_UNIX sockets are much lower
+performaning a 2nd set of runs with a socket buffer size and send/recv
+buffer sizes equivalent to AF_INET (TCP_STREAM) are done.
+
+Note, all subsequent AF_UNIX (STREAM_STREAM, STREAM_RR) tests are done
+with "-s 51882" such that the same total effective socket buffering is
+used as for the AF_INET runs defaults (16384+NNNNN/2).
+
+STREAM 32KB I/O x N: netperf -l 100 -t TCP_STREAM -- -m 32K -M 32K
+                     netperf -l 100 -t STREAM_STREAM -- -s 51882 -m 32K -M 32K
+                     netperf -l 100 -t TCP_STREAM -- -m 32K -M 32K
+
+          Baseline  AF_UNIX      Friends
+   N  COC Mbits/S   Mbits/S      Mbits/S
+   1   -    8616      9416 109%   11116 129% 118%
+   2   -   15419     17076 111%   20267 131% 119%
+  16   2   59497    303029 509%  347349 584% 115%
+  32   4   54223    273637 505%  272891 503% 100%
+ 256  32   58244     85476 147%  273696 470% 320%
+ 512  64   58745     87402 149%  260837 444% 298%
+1600 200   83161    158915 191%  383947 462% 242%
+
+COC = Cpu Over Commit ratio (16 core platform)
+
+Stream: netperf -l 100 -t TCP_STREAM
+        netperf -l 100 -t STREAM_STREAM -- -s 51882
+        netperf -l 100 -t TCP_STREAM
+
+netperf  Baseline  AF_UNIX      Friends
+-m/-M N  Mbits/S   Mbits/S      Mbits/S
+  64       1020       445  44%     515  50% 116%
+  1K       4881      4340  89%    5070 104% 117%
+  8K       5933      8387 141%    9770 165% 116%
+ 32K       8168      9538 117%   11067 135% 116%
+ 64K       9116      9774 107%   11515 126% 118%
+128K       9053     10044 111%   13082 145% 130%
+256K       9642     10351 107%   13470 140% 130%
+512K      10050     10142 101%   13327 133% 131%
+  1M       8640      9843 114%   12201 141% 124%
+ 16M       7179      9619 134%   11316 158% 118%
+
+Rr: netperf -l 100 -t TCP_RR
+    netperf -l 100 -t STREAM_RR -- -s 51882 -m 16384 -M 87380
+    netperf -l 100 -t TCP_RR
+
+netperf  Baseline  AF_UNIX      Friends
+-r N,N   Trans./S  Trans./S     Trans./S
+  64      47913     99681 208%   98225 205%  99%
+  1K      44045     92327 210%   91608 208%  99%
+  8K      26732     33201 124%   33025 124%  99%
+ 32K      10903     11972 110%   13574 124% 113%
+ 64K       7113      6718  94%    7176 101% 107%
+128K       4191      3431  82%    3695  88% 108%
+256K       2324      1937  83%    2147  92% 111%
+512K        958      1056 110%    1202 125% 114%
+  1M        404       508 126%     497 123%  98%
+ 16M       26.1      34.1 131%    32.9 126%  96%
+
+Crr: netperf -l 100 -t TCP_CRR
+     netperf -l 100 -t TCP_CRR
+
+netperf  Baseline  AF_UNIX      Friends
+  -r N   Trans./S  Trans./S     Trans./S
+  64      14690         -        18191 124%   -
+  1K      14258         -        17492 123%   -
+  8K      11535         -        14012 121%   -
+ 32K       7035         -         8974 128%   -
+ 64K       4312         -         5654 131%   -
+128K       2252         -         3179 141%   -
+256K       1237         -         2008 162%   -
+512K       17.5*        -         1079   ?    -
+  1M       4.93*        -          458   ?    -
+ 16M       8.29*        -         32.5   ?    -
+
+Note, "-" denotes test not supported for transport.
+      "*" denotes test results reported without statistical confidence.
+      "?" denotes results not comparable.
+
+SPLICE 32KB I/O:
+
+Source
+ Sink   Baseline  Friends
+ FSFS   Mbits/S   Mbits/S
+ ----     8042     10810 134%
+ Z---     7071      9773 138%
+ --N-     8039     10820 135%
+ Z-N-     7902      9796 124%
+ -S--    17326     37496 216%
+ ZS--     9008      9573 106%
+ -SN-    16154     36269 225%
+ ZSN-     9531      9640 101%
+ ---S     8466      9933 117%
+ Z--S     8000      9453 118%
+ --NS    12783     11379  89%
+ Z-NS    11055      9489  86%
+ -S-S    12741     24380 191%
+ ZS-S     8097     10242 126%
+ -SNS    16657     30954 186%
+ ZSNS    12108     12763 105%
+
+Note, "Z" source File /dev/zero, "-" source user memory
+      "N" sink File /dev/null, "-" sink user memory
+      "S" Splice on, "-" Splice off
+
+Signed-off-by: Bruce \"Brutus\" Curtis <brutus@google.com>
+Signed-off-by: Li Yu <bingtian.ly@taobao.com>
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/Documentation/networking/ip-sysctl.txt b/Documentation/networking/ip-sysctl.txt
+index e173d8a..fdaff5d 100644
+
+Acked-by: 
+
+--- a/Documentation/networking/ip-sysctl.txt
++++ b/Documentation/networking/ip-sysctl.txt
+@@ -183,6 +183,14 @@ tcp_fack - BOOLEAN
+ 	Enable FACK congestion avoidance and fast retransmission.
+ 	The value is not used, if tcp_sack is not enabled.
+ 
++tcp_friends - BOOLEAN
++	If set, TCP loopback socket pair stack bypass is enabled such
++	that all data sent will be directly queued to the receiver's
++	socket for receive. Note, normal connection establishment and
++	finish is used to make friends so any loopback interpose, e.g.
++	tcpdump, will see these TCP segements but no data segments.
++	Default: 1
++
+ tcp_fin_timeout - INTEGER
+ 	Time to hold socket in state FIN-WAIT-2, if it was closed
+ 	by our side. Peer can be broken and never close its side,
+diff --git a/include/linux/skbuff.h b/include/linux/skbuff.h
+index 17a87cd..8c2e7d4 100644
+--- a/include/linux/skbuff.h
++++ b/include/linux/skbuff.h
+@@ -284,6 +284,7 @@ typedef unsigned char *sk_buff_data_t;
+  *	@_skb_dst: destination entry
+  *	@sp: the security path, used for xfrm
+  *	@cb: Control buffer. Free for use by every layer. Put private vars here
++ *	@friend: loopback friend socket
+  *	@len: Length of actual data
+  *	@data_len: Data length
+  *	@mac_len: Length of link layer header
+@@ -347,6 +348,7 @@ struct sk_buff {
+ 	 */
+ 	char			cb[48];
+ 
++	struct sock             *friend;
+ 	unsigned int		len,
+ 				data_len;
+ 	__u16			mac_len,
+diff --git a/include/net/request_sock.h b/include/net/request_sock.h
+index bdffbfc..04a7b5b 100644
+--- a/include/net/request_sock.h
++++ b/include/net/request_sock.h
+@@ -55,6 +55,7 @@ struct request_sock {
+ 	unsigned long			expires;
+ 	const struct request_sock_ops	*rsk_ops;
+ 	struct sock			*sk;
++	struct sock			*friend;
+ 	u32				secid;
+ 	u32				peer_secid;
+ 	u64				ts_incoming;
+diff --git a/include/net/sock.h b/include/net/sock.h
+index b8ec504..52e2a0c 100644
+--- a/include/net/sock.h
++++ b/include/net/sock.h
+@@ -147,6 +147,7 @@ struct sock_common {
+   *	@sk_shutdown: mask of %SEND_SHUTDOWN and/or %RCV_SHUTDOWN
+   *	@sk_userlocks: %SO_SNDBUF and %SO_RCVBUF settings
+   *	@sk_lock:	synchronizer
++  *	@sk_friend: loopback friend socket
+   *	@sk_rcvbuf: size of receive buffer in bytes
+   *	@sk_sleep: sock wait queue
+   *	@sk_dst_cache: destination cache
+@@ -235,6 +236,14 @@ struct sock {
+ 	int			sk_rcvbuf;
+ 	socket_lock_t		sk_lock;
+ 	/*
++	 * If socket has a friend (sk_friend != NULL) then a send skb is
++	 * enqueued directly to the friend's sk_receive_queue such that:
++	 *
++	 *        sk_sndbuf -> sk_sndbuf + sk_friend->sk_rcvbuf
++	 *   sk_wmem_queued -> sk_friend->sk_rmem_alloc
++	 */
++	struct sock		*sk_friend;
++	/*
+ 	 * The backlog queue is special, it is always used with
+ 	 * the per-socket spinlock held and requires low latency
+ 	 * access. Therefore we special case it's implementation.
+@@ -590,24 +599,40 @@ static inline int sk_acceptq_is_full(struct sock *sk)
+ 	return sk->sk_ack_backlog > sk->sk_max_ack_backlog;
+ }
+ 
++static inline int sk_wmem_queued_get(const struct sock *sk)
++{
++	if (sk->sk_friend)
++		return atomic_read(&sk->sk_friend->sk_rmem_alloc);
++	else
++		return sk->sk_wmem_queued;
++}
++
++static inline int sk_sndbuf_get(const struct sock *sk)
++{
++	if (sk->sk_friend)
++		return sk->sk_sndbuf + sk->sk_friend->sk_rcvbuf;
++	else
++		return sk->sk_sndbuf;
++}
++
+ /*
+  * Compute minimal free write space needed to queue new packets.
+  */
+ static inline int sk_stream_min_wspace(struct sock *sk)
+ {
+-	return sk->sk_wmem_queued >> 1;
++	return sk_wmem_queued_get(sk) >> 1;
+ }
+ 
+ static inline int sk_stream_wspace(struct sock *sk)
+ {
+-	return sk->sk_sndbuf - sk->sk_wmem_queued;
++	return sk_sndbuf_get(sk) - sk_wmem_queued_get(sk);
+ }
+ 
+ extern void sk_stream_write_space(struct sock *sk);
+ 
+ static inline int sk_stream_memory_free(struct sock *sk)
+ {
+-	return sk->sk_wmem_queued < sk->sk_sndbuf;
++	return sk_wmem_queued_get(sk) < sk_sndbuf_get(sk);
+ }
+ 
+ /* OOB backlog add */
+@@ -681,6 +706,7 @@ static inline void sock_rps_save_rxhash(struct sock *sk, u32 rxhash)
+ 	})
+ 
+ extern int sk_stream_wait_connect(struct sock *sk, long *timeo_p);
++extern int sk_stream_wait_friend(struct sock *sk, long *timeo_p);
+ extern int sk_stream_wait_memory(struct sock *sk, long *timeo_p);
+ extern void sk_stream_wait_close(struct sock *sk, long timeo_p);
+ extern int sk_stream_error(struct sock *sk, int flags, int err);
+diff --git a/include/net/tcp.h b/include/net/tcp.h
+index 9092769..40b452d 100644
+--- a/include/net/tcp.h
++++ b/include/net/tcp.h
+@@ -606,6 +606,15 @@ extern u32	__tcp_select_window(struct sock *sk);
+  */
+ #define tcp_time_stamp		((__u32)(jiffies))
+ 
++/* If skb->friend, TCP friends per packet state.
++ */
++struct friend_skb_parm {
++	bool    tail_inuse;             /* In use by skb->friend send while */
++					/* on sk_receive_queue for tail put */
++};
++
++#define TCP_FRIEND_CB(tcb) (&(tcb)->header.hf)
++
+ /* This is what the send packet queuing engine uses to pass
+  * TCP per-packet control information to the transmission
+  * code.  We also store the host-order sequence numbers in
+@@ -619,6 +628,7 @@ struct tcp_skb_cb {
+ #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
+ 		struct inet6_skb_parm	h6;
+ #endif
++		struct friend_skb_parm  hf;
+ 	} header;	/* For incoming frames		*/
+ 	__u32		seq;		/* Starting sequence number	*/
+ 	__u32		end_seq;	/* SEQ + FIN + SYN + datalen	*/
+@@ -933,7 +943,7 @@ static inline int tcp_prequeue(struct sock *sk, struct sk_buff *skb)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 
+-	if (sysctl_tcp_low_latency || !tp->ucopy.task)
++	if (sysctl_tcp_low_latency || !tp->ucopy.task || sk->sk_friend)
+ 		return 0;
+ 
+ 	__skb_queue_tail(&tp->ucopy.prequeue, skb);
+@@ -1212,6 +1222,7 @@ extern int			tcp_v4_md5_do_del(struct sock *sk,
+ #else
+ #define tcp_twsk_md5_key(twsk)	NULL
+ #endif
++extern int sysctl_tcp_friends;
+ 
+ extern struct tcp_md5sig_pool	**tcp_alloc_md5sig_pool(struct sock *);
+ extern void			tcp_free_md5sig_pool(void);
+diff --git a/net/core/skbuff.c b/net/core/skbuff.c
+index dc4a95c..e873d16 100644
+--- a/net/core/skbuff.c
++++ b/net/core/skbuff.c
+@@ -551,6 +551,7 @@ static void __copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
+ #ifdef CONFIG_XFRM
+ 	new->sp			= secpath_get(old->sp);
+ #endif
++	new->friend		= old->friend;
+ 	memcpy(new->cb, old->cb, sizeof(old->cb));
+ 	new->csum		= old->csum;
+ 	new->local_df		= old->local_df;
+diff --git a/net/core/sock.c b/net/core/sock.c
+index 24b7e6b..b4d3d70 100644
+--- a/net/core/sock.c
++++ b/net/core/sock.c
+@@ -1904,6 +1904,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
+ #ifdef CONFIG_NET_DMA
+ 	skb_queue_head_init(&sk->sk_async_wait_queue);
+ #endif
++	sk->sk_friend		=	NULL;
+ 
+ 	sk->sk_send_head	=	NULL;
+ 
+diff --git a/net/core/stream.c b/net/core/stream.c
+index a37debf..5157315 100644
+--- a/net/core/stream.c
++++ b/net/core/stream.c
+@@ -81,6 +81,42 @@ int sk_stream_wait_connect(struct sock *sk, long *timeo_p)
+ EXPORT_SYMBOL(sk_stream_wait_connect);
+ 
+ /**
++ * sk_stream_wait_friend - Wait for a socket to make friends
++ * @sk: sock to wait on
++ * @timeo_p: for how long to wait
++ *
++ * Must be called with the socket locked.
++ */
++int sk_stream_wait_friend(struct sock *sk, long *timeo_p)
++{
++	struct task_struct *tsk = current;
++	DEFINE_WAIT(wait);
++	int done;
++
++	do {
++		int err = sock_error(sk);
++		if (err)
++			return err;
++		if (!sk->sk_friend)
++			return -EBADFD;
++		if (!*timeo_p)
++			return -EAGAIN;
++		if (signal_pending(tsk))
++			return sock_intr_errno(*timeo_p);
++
++		prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
++		sk->sk_write_pending++;
++		done = sk_wait_event(sk, timeo_p,
++				     !sk->sk_err &&
++				     sk->sk_friend->sk_friend);
++		finish_wait(sk->sk_sleep, &wait);
++		sk->sk_write_pending--;
++	} while (!done);
++	return 0;
++}
++EXPORT_SYMBOL(sk_stream_wait_friend);
++
++/**
+  * sk_stream_closing - Return 1 if we still have things to send in our buffers.
+  * @sk: socket to verify
+  */
+diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
+index a3f563c..db773f3 100644
+--- a/net/ipv4/inet_connection_sock.c
++++ b/net/ipv4/inet_connection_sock.c
+@@ -580,6 +580,26 @@ struct sock *inet_csk_clone(struct sock *sk, const struct request_sock *req,
+ 	if (newsk != NULL) {
+ 		struct inet_connection_sock *newicsk = inet_csk(newsk);
+ 
++		if (req->friend) {
++			/*
++			 * Make friends with the requestor but the ACK of
++			 * the request is already in-flight so the race is
++			 * on to make friends before the ACK is processed.
++			 * If the requestor's sk_friend value is != NULL
++			 * then the requestor has already processed the
++			 * ACK so indicate state change to wake'm up.
++			 */
++			struct sock *was;
++
++			sock_hold(req->friend);
++			newsk->sk_friend = req->friend;
++			sock_hold(newsk);
++			was = xchg(&req->friend->sk_friend, newsk);
++			/* If requester already connect()ed, maybe sleeping */
++			if (was && !sock_flag(req->friend, SOCK_DEAD))
++				sk->sk_state_change(req->friend);
++		}
++
+ 		newsk->sk_state = TCP_SYN_RECV;
+ 		newicsk->icsk_bind_hash = NULL;
+ 
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 5c2222e..b5d1ffe 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -777,6 +777,13 @@ static struct ctl_table ipv4_table[] = {
+ 		.strategy	= sysctl_intvec,
+ 		.extra1		= &zero
+ 	},
++	{
++		.procname       = "tcp_friends",
++		.data           = &sysctl_tcp_friends,
++		.maxlen         = sizeof(int),
++		.mode           = 0644,
++		.proc_handler   = proc_dointvec
++	},
+ 	{ .ctl_name = 0 }
+ };
+ 
+diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
+index 414f590..4c5458c 100644
+--- a/net/ipv4/tcp.c
++++ b/net/ipv4/tcp.c
+@@ -310,6 +310,56 @@ struct tcp_splice_state {
+ };
+ 
+ /*
++ * Validate friendp, if not a friend return 0, else if friend is also a
++ * friend return 1, else friendp points to a listen()er so wait for our
++ * friend to be ready then update friendp with pointer to the real friend
++ * and return 1, else an error has occurred so return a -errno.
++ */
++static inline int tcp_friend_validate(struct sock *sk, struct sock **friendp,
++			      long *timeo)
++{
++	struct sock *friend = *friendp;
++
++	if (!friend)
++		return 0;
++	if (unlikely(!friend->sk_friend)) {
++		/* Friendship not complete, wait? */
++		int err;
++
++		if (!timeo)
++			return -EAGAIN;
++		err = sk_stream_wait_friend(sk, timeo);
++		if (err < 0)
++			return err;
++		*friendp = sk->sk_friend;
++	}
++	return 1;
++}
++
++static inline int tcp_friend_send_lock(struct sock *friend)
++{
++	int err = 0;
++
++	spin_lock_bh(&friend->sk_lock.slock);
++	if (unlikely(friend->sk_shutdown & RCV_SHUTDOWN)) {
++		spin_unlock_bh(&friend->sk_lock.slock);
++		err = -ECONNRESET;
++	}
++
++	return err;
++}
++
++static inline void tcp_friend_recv_lock(struct sock *friend)
++{
++	spin_lock_bh(&friend->sk_lock.slock);
++}
++
++static void tcp_friend_unlock(struct sock *friend)
++{
++	spin_unlock_bh(&friend->sk_lock.slock);
++}
++
++/*
+  * Pressure flag: try to collapse.
+  * Technical note: it is used by multiple contexts non atomically.
+  * All the __sk_mem_schedule() is of this nature: accounting
+@@ -510,6 +560,76 @@ int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg)
+ 	return put_user(answ, (int __user *)arg);
+ }
+ 
++/*
++ * Friend receive_queue tail skb space? If true, set tail_inuse.
++ * Else if RCV_SHUTDOWN, return *copy = -ECONNRESET.
++ */
++static inline struct sk_buff *tcp_friend_tail(struct sock *friend, int *copy)
++{
++	struct sk_buff	*skb = NULL;
++	int		sz = 0;
++
++	if (skb_peek_tail(&friend->sk_receive_queue)) {
++		sz = tcp_friend_send_lock(friend);
++		if (!sz) {
++			skb = skb_peek_tail(&friend->sk_receive_queue);
++			if (skb && skb->friend) {
++				if (!*copy)
++					sz = skb_tailroom(skb);
++				else {
++					sz = *copy - skb->len;
++					if (sz < 0)
++						sz = 0;
++				}
++				if (sz > 0)
++					TCP_FRIEND_CB(TCP_SKB_CB(skb))->
++							tail_inuse = true;
++			}
++			tcp_friend_unlock(friend);
++		}
++	}
++
++	*copy = sz;
++	return skb;
++}
++
++static inline void tcp_friend_seq(struct sock *sk, int copy, int charge)
++{
++	struct sock	*friend = sk->sk_friend;
++	struct tcp_sock *tp = tcp_sk(friend);
++
++	if (charge) {
++		sk_mem_charge(friend, charge);
++		atomic_add(charge, &friend->sk_rmem_alloc);
++	}
++	tp->rcv_nxt += copy;
++	tp->rcv_wup += copy;
++	tcp_friend_unlock(friend);
++
++	tp = tcp_sk(sk);
++	tp->snd_nxt += copy;
++	tp->pushed_seq += copy;
++	tp->snd_una += copy;
++	tp->snd_up += copy;
++}
++
++static inline bool tcp_friend_push(struct sock *sk, struct sk_buff *skb)
++{
++	struct sock	*friend = sk->sk_friend;
++	int		wait = false;
++
++	skb_set_owner_r(skb, friend);
++	__skb_queue_tail(&friend->sk_receive_queue, skb);
++	if (!sk_rmem_schedule(friend, skb->truesize))
++		wait = true;
++
++	tcp_friend_seq(sk, skb->len, 0);
++	if (skb == skb_peek(&friend->sk_receive_queue))
++		friend->sk_data_ready(friend, 0);
++
++	return wait;
++}
++
+ static inline void tcp_mark_push(struct tcp_sock *tp, struct sk_buff *skb)
+ {
+ 	TCP_SKB_CB(skb)->flags |= TCPCB_FLAG_PSH;
+@@ -526,8 +646,13 @@ static inline void skb_entail(struct sock *sk, struct sk_buff *skb)
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+ 
+-	skb->csum    = 0;
+ 	tcb->seq     = tcb->end_seq = tp->write_seq;
++	if (sk->sk_friend) {
++		skb->friend = sk;
++		TCP_FRIEND_CB(tcb)->tail_inuse = false;
++		return;
++	}
++	skb->csum    = 0;
+ 	tcb->flags   = TCPCB_FLAG_ACK;
+ 	tcb->sacked  = 0;
+ 	skb_header_release(skb);
+@@ -550,7 +675,10 @@ static inline void tcp_push(struct sock *sk, int flags, int mss_now,
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 
+-	if (tcp_send_head(sk)) {
++	if (sk->sk_friend) {
++		if (skb_peek(&sk->sk_friend->sk_receive_queue))
++			sk->sk_friend->sk_data_ready(sk->sk_friend, 0);
++	} else if (tcp_send_head(sk)) {
+ 		struct sk_buff *skb = tcp_write_queue_tail(sk);
+ 		if (!(flags & MSG_MORE) || forced_push(tp))
+ 			tcp_mark_push(tp, skb);
+@@ -678,6 +806,19 @@ ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
+ 	return ret;
+ }
+ 
++static inline struct sk_buff *tcp_friend_alloc_skb(struct sock *sk, int size)
++{
++	struct sk_buff *skb;
++
++	skb = alloc_skb(size, sk->sk_allocation);
++	if (!skb) {
++		sk->sk_prot->enter_memory_pressure(sk);
++		sk_stream_moderate_sndbuf(sk);
++	}
++
++	return skb;
++}
++
+ struct sk_buff *sk_stream_alloc_skb(struct sock *sk, int size, gfp_t gfp)
+ {
+ 	struct sk_buff *skb;
+@@ -734,30 +875,76 @@ static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
+ 	return max(xmit_size_goal, mss_now);
+ }
+ 
++static unsigned int tcp_friend_xmit_size_goal(struct sock *sk, int size_goal)
++{
++	u32 size = SKB_DATA_ALIGN(size_goal);
++	u32 overhead = sizeof(struct skb_shared_info) + sizeof(struct sk_buff);
++
++	/*
++	 * If alloc >= largest skb use largest order, else check
++	 * for optimal tail fill size, else use largest order.
++	 */
++	if (size >= SKB_MAX_ORDER(0, 4))
++		size = SKB_MAX_ORDER(0, 4);
++	else if (size <= (SKB_MAX_ORDER(0, 0) >> 3))
++		size = SKB_MAX_ORDER(0, 0);
++	else if (size <= (SKB_MAX_ORDER(0, 1) >> 3))
++		size = SKB_MAX_ORDER(0, 1);
++	else if (size <= (SKB_MAX_ORDER(0, 0) >> 1))
++		size = SKB_MAX_ORDER(0, 0);
++	else if (size <= (SKB_MAX_ORDER(0, 1) >> 1))
++		size = SKB_MAX_ORDER(0, 1);
++	else if (size <= (SKB_MAX_ORDER(0, 2) >> 1))
++		size = SKB_MAX_ORDER(0, 2);
++	else if (size <= (SKB_MAX_ORDER(0, 3) >> 1))
++		size = SKB_MAX_ORDER(0, 3);
++	else
++		size = SKB_MAX_ORDER(0, 4);
++
++	/* At least 2 true sized in sk_buf */
++	if (size + overhead > (sk_sndbuf_get(sk) >> 1))
++		size = (sk_sndbuf_get(sk) >> 1) - overhead;
++
++	return size;
++}
++
+ static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
+ {
+ 	int mss_now;
++	int tmp;
+ 
+-	mss_now = tcp_current_mss(sk);
+-	*size_goal = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
++	if (sk->sk_friend) {
++		mss_now = tcp_friend_xmit_size_goal(sk, *size_goal);
++		tmp = mss_now;
++	} else {
++		mss_now = tcp_current_mss(sk);
++		tmp = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
++	}
+ 
++	*size_goal = tmp;
+ 	return mss_now;
+ }
+ 
+ static ssize_t do_tcp_sendpages(struct sock *sk, struct page **pages, int poffset,
+ 			 size_t psize, int flags)
+ {
++	struct sock *friend = sk->sk_friend;
+ 	struct tcp_sock *tp = tcp_sk(sk);
+-	int mss_now, size_goal;
++	int mss_now, size_goal = psize;
+ 	int err;
+ 	ssize_t copied;
+ 	long timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
++	struct tcp_skb_cb *tcb;
+ 
+ 	/* Wait for a connection to finish. */
+ 	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
+ 		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
+ 			goto out_err;
+ 
++	err = tcp_friend_validate(sk, &friend, &timeo);
++	if (err < 0)
++		goto out_err;
++
+ 	clear_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
+ 
+ 	mss_now = tcp_send_mss(sk, &size_goal, flags);
+@@ -774,18 +961,40 @@ static ssize_t do_tcp_sendpages(struct sock *sk, struct page **pages, int poffse
+ 		int offset = poffset % PAGE_SIZE;
+ 		int size = min_t(size_t, psize, PAGE_SIZE - offset);
+ 
+-		if (!tcp_send_head(sk) || (copy = size_goal - skb->len) <= 0) {
++		if (friend) {
++			copy = size_goal;
++			skb = tcp_friend_tail(friend, &copy);
++			if (copy < 0) {
++				sk->sk_err = -copy;
++				err = -EPIPE;
++				goto out_err;
++			}
++		} else if (!tcp_send_head(sk)) {
++			skb = NULL;
++			copy = 0;
++		} else {
++			skb = tcp_write_queue_tail(sk);
++			copy = size_goal - skb->len;
++		}
++
++		if (copy <= 0) {
+ new_segment:
+ 			if (!sk_stream_memory_free(sk))
+ 				goto wait_for_sndbuf;
+ 
+-			skb = sk_stream_alloc_skb(sk, 0, sk->sk_allocation);
++			if (friend)
++				skb = tcp_friend_alloc_skb(sk, 0);
++			else
++				skb = sk_stream_alloc_skb(sk, 0,
++							sk->sk_allocation);
++
+ 			if (!skb)
+ 				goto wait_for_memory;
+ 
+ 			skb_entail(sk, skb);
+ 			copy = size_goal;
+ 		}
++		tcb = TCP_SKB_CB(skb);
+ 
+ 		if (copy > size)
+ 			copy = size;
+@@ -793,10 +1002,14 @@ new_segment:
+ 		i = skb_shinfo(skb)->nr_frags;
+ 		can_coalesce = skb_can_coalesce(skb, i, page, offset);
+ 		if (!can_coalesce && i >= MAX_SKB_FRAGS) {
+-			tcp_mark_push(tp, skb);
++			if (friend) {
++				if (TCP_FRIEND_CB(tcb)->tail_inuse)
++					TCP_FRIEND_CB(tcb)->tail_inuse = false;
++			} else
++				tcp_mark_push(tp, skb);
+ 			goto new_segment;
+ 		}
+-		if (!sk_wmem_schedule(sk, copy))
++		if (!friend && !sk_wmem_schedule(sk, copy))
+ 			goto wait_for_memory;
+ 
+ 		if (can_coalesce) {
+@@ -809,19 +1022,40 @@ new_segment:
+ 		skb->len += copy;
+ 		skb->data_len += copy;
+ 		skb->truesize += copy;
+-		sk->sk_wmem_queued += copy;
+-		sk_mem_charge(sk, copy);
+-		skb->ip_summed = CHECKSUM_PARTIAL;
+ 		tp->write_seq += copy;
+-		TCP_SKB_CB(skb)->end_seq += copy;
+-		skb_shinfo(skb)->gso_segs = 0;
+-
+-		if (!copied)
+-			TCP_SKB_CB(skb)->flags &= ~TCPCB_FLAG_PSH;
+ 
+ 		copied += copy;
+ 		poffset += copy;
+-		if (!(psize -= copy))
++		psize -= copy;
++
++		if (friend) {
++			err = tcp_friend_send_lock(friend);
++			if (err) {
++				sk->sk_err = -err;
++				err = -EPIPE;
++				goto out_err;
++			}
++			tcb->end_seq += copy;
++			if (TCP_FRIEND_CB(tcb)->tail_inuse) {
++				TCP_FRIEND_CB(tcb)->tail_inuse = false;
++				tcp_friend_seq(sk, copy, copy);
++			} else {
++				if (tcp_friend_push(sk, skb))
++					goto wait_for_sndbuf;
++			}
++			if (!psize)
++				goto out;
++			continue;
++		}
++
++		tcb->end_seq += copy;
++		skb_shinfo(skb)->gso_segs = 0;
++
++		sk->sk_wmem_queued += copy;
++		sk_mem_charge(sk, copy);
++		skb->ip_summed = CHECKSUM_PARTIAL;
++
++		if (!psize)
+ 			goto out;
+ 
+ 		if (skb->len < size_goal || (flags & MSG_OOB))
+@@ -843,7 +1077,8 @@ wait_for_memory:
+ 		if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
+ 			goto do_error;
+ 
+-		mss_now = tcp_send_mss(sk, &size_goal, flags);
++		if (!friend)
++			mss_now = tcp_send_mss(sk, &size_goal, flags);
+ 	}
+ 
+ out:
+@@ -904,11 +1139,13 @@ int tcp_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
+ {
+ 	struct sock *sk = sock->sk;
+ 	struct iovec *iov;
++	struct sock *friend = sk->sk_friend;
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	struct sk_buff *skb;
++	struct tcp_skb_cb *tcb;
+ 	int iovlen, flags;
+-	int mss_now, size_goal;
+-	int err, copied;
++	int err, copied = 0;
++	int mss_now = 0, size_goal = size;
+ 	long timeo;
+ 
+ 	lock_sock(sk);
+@@ -922,6 +1159,10 @@ int tcp_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
+ 		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
+ 			goto out_err;
+ 
++	err = tcp_friend_validate(sk, &friend, &timeo);
++	if (err < 0)
++		goto out;
++
+ 	/* This should be in poll */
+ 	clear_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
+ 
+@@ -947,22 +1188,39 @@ int tcp_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
+ 			int max = size_goal;
+ 
+ 			skb = tcp_write_queue_tail(sk);
+-			if (tcp_send_head(sk)) {
+-				if (skb->ip_summed == CHECKSUM_NONE)
+-					max = mss_now;
+-				copy = max - skb->len;
++			if (friend) {
++				skb = tcp_friend_tail(friend, &copy);
++				if (copy < 0) {
++					sk->sk_err = -copy;
++					err = -EPIPE;
++					goto out_err;
++				}
++			} else {
++				skb = tcp_write_queue_tail(sk);
++				if (tcp_send_head(sk)) {
++					if (skb->ip_summed == CHECKSUM_NONE)
++						max = mss_now;
++					copy = max - skb->len;
++				}
+ 			}
+ 
+ 			if (copy <= 0) {
+ new_segment:
+-				/* Allocate new segment. If the interface is SG,
+-				 * allocate skb fitting to single page.
+-				 */
+ 				if (!sk_stream_memory_free(sk))
+ 					goto wait_for_sndbuf;
+ 
+-				skb = sk_stream_alloc_skb(sk, select_size(sk),
+-						sk->sk_allocation);
++				if (friend)
++					skb = tcp_friend_alloc_skb(sk, max);
++				else {
++					/* Allocate new segment. If the
++					 * interface is SG, allocate skb
++					 * fitting to single page.
++					 */
++					skb = sk_stream_alloc_skb(sk,
++							select_size(sk),
++							sk->sk_allocation);
++				}
++
+ 				if (!skb)
+ 					goto wait_for_memory;
+ 
+@@ -976,6 +1234,7 @@ new_segment:
+ 				copy = size_goal;
+ 				max = size_goal;
+ 			}
++			tcb = TCP_SKB_CB(skb);
+ 
+ 			/* Try to append data to the end of skb. */
+ 			if (copy > seglen)
+@@ -1061,16 +1320,34 @@ new_segment:
+ 				TCP_OFF(sk) = off + copy;
+ 			}
+ 
+-			if (!copied)
+-				TCP_SKB_CB(skb)->flags &= ~TCPCB_FLAG_PSH;
+-
+ 			tp->write_seq += copy;
+-			TCP_SKB_CB(skb)->end_seq += copy;
+-			skb_shinfo(skb)->gso_segs = 0;
+ 
+ 			from += copy;
+ 			copied += copy;
+-			if ((seglen -= copy) == 0 && iovlen == 0)
++			seglen -= copy;
++
++			if (friend) {
++				err = tcp_friend_send_lock(friend);
++				if (err) {
++					sk->sk_err = -err;
++					err = -EPIPE;
++					goto out_err;
++				}
++				tcb->end_seq += copy;
++				if (TCP_FRIEND_CB(tcb)->tail_inuse) {
++					TCP_FRIEND_CB(tcb)->tail_inuse = false;
++					tcp_friend_seq(sk, copy, 0);
++				} else {
++					if (tcp_friend_push(sk, skb))
++						goto wait_for_sndbuf;
++				}
++				continue;
++			}
++
++			tcb->end_seq += copy;
++			skb_shinfo(skb)->gso_segs = 0;
++
++			if (seglen == 0 && iovlen == 0)
+ 				goto out;
+ 
+ 			if (skb->len < max || (flags & MSG_OOB))
+@@ -1092,7 +1369,8 @@ wait_for_memory:
+ 			if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
+ 				goto do_error;
+ 
+-			mss_now = tcp_send_mss(sk, &size_goal, flags);
++			if (!friend)
++				mss_now = tcp_send_mss(sk, &size_goal, flags);
+ 		}
+ 	}
+ 
+@@ -1104,7 +1382,12 @@ out:
+ 	return copied;
+ 
+ do_fault:
+-	if (!skb->len) {
++	if (skb->friend) {
++		if (TCP_FRIEND_CB(tcb)->tail_inuse)
++			TCP_FRIEND_CB(tcb)->tail_inuse = false;
++		else
++			__kfree_skb(skb);
++	} else if (!skb->len) {
+ 		tcp_unlink_write_queue(skb, sk);
+ 		/* It is the one place in all of TCP, except connection
+ 		 * reset, where we can be unlinking the send_head.
+@@ -1123,6 +1406,13 @@ out_err:
+ 	return err;
+ }
+ 
++static inline void tcp_friend_write_space(struct sock *sk)
++{
++	/* Queued data below 1/4th of sndbuf? */
++	if ((sk_sndbuf_get(sk) >> 2) > sk_wmem_queued_get(sk))
++		sk->sk_friend->sk_write_space(sk->sk_friend);
++}
++
+ /*
+  *	Handle reading urgent data. BSD has very simple semantics for
+  *	this, no blocking and very strange errors 8)
+@@ -1182,9 +1472,13 @@ void tcp_cleanup_rbuf(struct sock *sk, int copied)
+ {
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	int time_to_ack = 0;
++	struct sk_buff *skb;
++
++	if (sk->sk_friend)
++		return;
+ 
+ #if TCP_DEBUG
+-	struct sk_buff *skb = skb_peek(&sk->sk_receive_queue);
++	skb = skb_peek(&sk->sk_receive_queue);
+ 
+ 	WARN(skb && !before(tp->copied_seq, TCP_SKB_CB(skb)->end_seq),
+ 	     KERN_INFO "cleanup rbuf bug: copied %X seq %X rcvnxt %X\n",
+@@ -1256,17 +1550,27 @@ static void tcp_prequeue_process(struct sock *sk)
+ 	tp->ucopy.memory = 0;
+ }
+ 
+-static inline struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
++static inline struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off,
++					   size_t *len)
+ {
+ 	struct sk_buff *skb;
+ 	u32 offset;
++	size_t avail;
+ 
+ 	skb_queue_walk(&sk->sk_receive_queue, skb) {
+-		offset = seq - TCP_SKB_CB(skb)->seq;
+-		if (tcp_hdr(skb)->syn)
+-			offset--;
+-		if (offset < skb->len || tcp_hdr(skb)->fin) {
++		struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
++
++		offset = seq - tcb->seq;
++		if (skb->friend)
++			avail = (u32)(tcb->end_seq - seq);
++		else {
++			if (tcp_hdr(skb)->syn)
++				offset--;
++			avail = skb->len - offset;
++		}
++		if (avail > 0 || (!skb->friend && tcp_hdr(skb)->fin)) {
+ 			*off = offset;
++			*len = avail;
+ 			return skb;
+ 		}
+ 	}
+@@ -1292,15 +1596,24 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
+ 	u32 seq = tp->copied_seq;
+ 	u32 offset;
+ 	int copied = 0;
++	size_t len;
++	int err;
++	struct sock *friend = sk->sk_friend;
++	long timeo = sock_rcvtimeo(sk, false);
+ 
+ 	if (sk->sk_state == TCP_LISTEN)
+ 		return -ENOTCONN;
+-	while ((skb = tcp_recv_skb(sk, seq, &offset)) != NULL) {
+-		if (offset < skb->len) {
+-			int used;
+-			size_t len;
+ 
+-			len = skb->len - offset;
++	err = tcp_friend_validate(sk, &friend, &timeo);
++	if (err < 0)
++		return err;
++	if (friend)
++		tcp_friend_recv_lock(sk);
++
++	while ((skb = tcp_recv_skb(sk, seq, &offset, &len)) != NULL) {
++		if (len > 0) {
++			int used;
++again:
+ 			/* Stop reading if we hit a patch of urgent data */
+ 			if (tp->urg_data) {
+ 				u32 urg_offset = tp->urg_seq - seq;
+@@ -1309,6 +1622,9 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
+ 				if (!len)
+ 					break;
+ 			}
++			if (friend)
++				tcp_friend_unlock(sk);
++
+ 			used = recv_actor(desc, skb, offset, len);
+ 			if (used < 0) {
+ 				if (!copied)
+@@ -1319,32 +1635,63 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
+ 				copied += used;
+ 				offset += used;
+ 			}
+-			/*
+-			 * If recv_actor drops the lock (e.g. TCP splice
+-			 * receive) the skb pointer might be invalid when
+-			 * getting here: tcp_collapse might have deleted it
+-			 * while aggregating skbs from the socket queue.
+-			 */
+-			skb = tcp_recv_skb(sk, seq-1, &offset);
+-			if (!skb || (offset+1 != skb->len))
+-				break;
++
++			if (friend)
++				tcp_friend_recv_lock(sk);
++			if (skb->friend) {
++				len = (u32)(TCP_SKB_CB(skb)->end_seq - seq);
++				if (len > 0) {
++					/*
++					 * Friend did an skb_put() while we
++					 * were away so process the same skb.
++					 */
++					if (!desc->count)
++						break;
++					tp->copied_seq = seq;
++					goto again;
++				}
++			} else {
++				/*
++				 * If recv_actor drops the lock (e.g. TCP
++				 * splice receive) the skb pointer might be
++				 * invalid when getting here: tcp_collapse
++				 * might have deleted it while aggregating
++				 * skbs from the socket queue.
++				 */
++				skb = tcp_recv_skb(sk, seq-1, &offset, &len);
++				if (!skb || (offset+1 != skb->len))
++					break;
++			}
+ 		}
+-		if (tcp_hdr(skb)->fin) {
++		if (!skb->friend && tcp_hdr(skb)->fin) {
+ 			sk_eat_skb(sk, skb, 0);
+ 			++seq;
+ 			break;
+ 		}
+-		sk_eat_skb(sk, skb, 0);
++		if (skb->friend) {
++			if (!TCP_FRIEND_CB(TCP_SKB_CB(skb))->tail_inuse) {
++				__skb_unlink(skb, &sk->sk_receive_queue);
++				__kfree_skb(skb);
++				tcp_friend_write_space(sk);
++			}
++			tcp_friend_unlock(sk);
++			tcp_friend_recv_lock(sk);
++		} else
++			sk_eat_skb(sk, skb, 0);
+ 		if (!desc->count)
+ 			break;
+ 	}
+ 	tp->copied_seq = seq;
+ 
+-	tcp_rcv_space_adjust(sk);
+-
+-	/* Clean up data we have read: This will do ACK frames. */
+-	if (copied > 0)
+-		tcp_cleanup_rbuf(sk, copied);
++	if (friend) {
++		tcp_friend_unlock(sk);
++		tcp_friend_write_space(sk);
++	} else {
++		tcp_rcv_space_adjust(sk);
++		/* Clean up data we have read: This will do ACK frames. */
++		if (copied > 0)
++			tcp_cleanup_rbuf(sk, copied);
++	}
+ 	return copied;
+ }
+ 
+@@ -1359,6 +1706,7 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
+ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 		size_t len, int nonblock, int flags, int *addr_len)
+ {
++	struct sock *friend = sk->sk_friend;
+ 	struct tcp_sock *tp = tcp_sk(sk);
+ 	int copied = 0;
+ 	u32 peek_seq;
+@@ -1371,6 +1719,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 	int copied_early = 0;
+ 	struct sk_buff *skb;
+ 	u32 urg_hole = 0;
++	bool locked = false;
+ 
+ 	lock_sock(sk);
+ 
+@@ -1382,6 +1731,10 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 
+ 	timeo = sock_rcvtimeo(sk, nonblock);
+ 
++	err = tcp_friend_validate(sk, &friend, &timeo);
++	if (err < 0)
++		goto out;
++
+ 	/* Urgent data needs to be handled specially. */
+ 	if (flags & MSG_OOB)
+ 		goto recv_urg;
+@@ -1405,7 +1758,7 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 			available = TCP_SKB_CB(skb)->seq + skb->len - (*seq);
+ 		if ((available < target) &&
+ 		    (len > sysctl_tcp_dma_copybreak) && !(flags & MSG_PEEK) &&
+-		    !sysctl_tcp_low_latency &&
++		    !sysctl_tcp_low_latency && !friend &&
+ 		    dma_find_channel(DMA_MEMCPY)) {
+ 			preempt_enable_no_resched();
+ 			tp->ucopy.pinned_list =
+@@ -1416,7 +1769,10 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 	}
+ #endif
+ 
++	err = 0;
++
+ 	do {
++		struct tcp_skb_cb *tcb;
+ 		u32 offset;
+ 
+ 		/* Are we at urgent data? Stop if we have read anything or have SIGURG pending. */
+@@ -1429,34 +1785,75 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 			}
+ 		}
+ 
+-		/* Next get a buffer. */
++		/*
++		 * Next get a buffer. Note, for friends sendmsg() queues
++		 * data directly to our sk_receive_queue by holding our
++		 * slock and either tail queuing a new skb or adding new
++		 * data to the tail skb. In the later case tail_inuse is
++		 * set, slock dropped, copyin, skb->len updated, re-hold
++		 * slock, end_seq updated, so we can only use the bytes
++		 * from *seq to end_seq!
++		 */
++		if (friend && !locked) {
++			tcp_friend_recv_lock(sk);
++			locked = true;
++		}
+ 
+ 		skb_queue_walk(&sk->sk_receive_queue, skb) {
++			tcb = TCP_SKB_CB(skb);
++			offset = *seq - tcb->seq;
++			if (friend) {
++				if (skb->friend) {
++					used = (u32)(tcb->end_seq - *seq);
++					if (used > 0) {
++						tcp_friend_unlock(sk);
++						locked = false;
++						/* Can use it all */
++						goto found_ok_skb;
++					}
++					/* No data to copyout */
++					if (flags & MSG_PEEK)
++						continue;
++					if (!TCP_FRIEND_CB(tcb)->tail_inuse)
++						goto unlink;
++					break;
++				}
++				tcp_friend_unlock(sk);
++				locked = false;
++			}
++
+ 			/* Now that we have two receive queues this
+ 			 * shouldn't happen.
+ 			 */
+-			if (WARN(before(*seq, TCP_SKB_CB(skb)->seq),
++			if (WARN(before(*seq, tcb->seq),
+ 			     KERN_INFO "recvmsg bug: copied %X "
+-				       "seq %X rcvnxt %X fl %X\n", *seq,
+-				       TCP_SKB_CB(skb)->seq, tp->rcv_nxt,
++				       "seq %X rcvnxt %X fl %X\n",
++				       *seq, tcb->seq, tp->rcv_nxt,
+ 				       flags))
+ 				break;
+ 
+-			offset = *seq - TCP_SKB_CB(skb)->seq;
+ 			if (tcp_hdr(skb)->syn)
+ 				offset--;
+-			if (offset < skb->len)
++			if (offset < skb->len) {
++				/* Ok so how much can we use? */
++				used = skb->len - offset;
+ 				goto found_ok_skb;
++			}
+ 			if (tcp_hdr(skb)->fin)
+ 				goto found_fin_ok;
+ 			WARN(!(flags & MSG_PEEK), KERN_INFO "recvmsg bug 2: "
+ 					"copied %X seq %X rcvnxt %X fl %X\n",
+-					*seq, TCP_SKB_CB(skb)->seq,
++					*seq, tcb->seq,
+ 					tp->rcv_nxt, flags);
+ 		}
+ 
+ 		/* Well, if we have backlog, try to process it now yet. */
+ 
++		if (friend && locked) {
++			tcp_friend_unlock(sk);
++			locked = false;
++		}
++
+ 		if (copied >= target && !sk->sk_backlog.tail)
+ 			break;
+ 
+@@ -1503,7 +1900,8 @@ int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+ 
+ 		tcp_cleanup_rbuf(sk, copied);
+ 
+-		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
++		if (!sysctl_tcp_low_latency && !friend &&
++		    tp->ucopy.task == user_recv) {
+ 			/* Install new reader */
+ 			if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
+ 				user_recv = current;
+@@ -1592,8 +1990,6 @@ do_prequeue:
+ 		continue;
+ 
+ 	found_ok_skb:
+-		/* Ok so how much can we use? */
+-		used = skb->len - offset;
+ 		if (len < used)
+ 			used = len;
+ 
+@@ -1646,7 +2042,7 @@ do_prequeue:
+ 				if (err) {
+ 					/* Exception. Bailout! */
+ 					if (!copied)
+-						copied = -EFAULT;
++						copied = err;
+ 					break;
+ 				}
+ 			}
+@@ -1655,6 +2051,7 @@ do_prequeue:
+ 		*seq += used;
+ 		copied += used;
+ 		len -= used;
++		offset += used;
+ 
+ 		tcp_rcv_space_adjust(sk);
+ 
+@@ -1663,11 +2060,45 @@ skip_copy:
+ 			tp->urg_data = 0;
+ 			tcp_fast_path_check(sk);
+ 		}
+-		if (used + offset < skb->len)
++
++		if (skb->friend) {
++			tcp_friend_recv_lock(sk);
++			locked = true;
++			used = (u32)(tcb->end_seq - *seq);
++			if (used) {
++				/*
++				 * Friend did an skb_put() while we were away
++				 * so if more to do process the same skb.
++				 */
++				if (len > 0) {
++					tcp_friend_unlock(sk);
++					locked = false;
++					goto found_ok_skb;
++				}
++				continue;
++			}
++			if (TCP_FRIEND_CB(tcb)->tail_inuse) {
++				/* Give sendmsg a chance */
++				tcp_friend_unlock(sk);
++				locked = false;
++				continue;
++			}
++			if (!(flags & MSG_PEEK)) {
++unlink:
++				__skb_unlink(skb, &sk->sk_receive_queue);
++				__kfree_skb(skb);
++				tcp_friend_unlock(sk);
++				locked = false;
++				tcp_friend_write_space(sk);
++			}
+ 			continue;
++		}
+ 
+-		if (tcp_hdr(skb)->fin)
++		if (offset < skb->len)
++			continue;
++		else if (tcp_hdr(skb)->fin)
+ 			goto found_fin_ok;
++
+ 		if (!(flags & MSG_PEEK)) {
+ 			sk_eat_skb(sk, skb, copied_early);
+ 			copied_early = 0;
+@@ -1684,6 +2115,9 @@ skip_copy:
+ 		break;
+ 	} while (len > 0);
+ 
++	if (friend && locked)
++		tcp_friend_unlock(sk);
++
+ 	if (user_recv) {
+ 		if (!skb_queue_empty(&tp->ucopy.prequeue)) {
+ 			int chunk;
+@@ -1862,6 +2296,9 @@ void tcp_close(struct sock *sk, long timeout)
+ 		goto adjudge_to_death;
+ 	}
+ 
++	if (sk->sk_friend)
++		sock_put(sk->sk_friend);
++
+ 	/*  We need to flush the recv. buffs.  We do this only on the
+ 	 *  descriptor close, not protocol-sourced closes, because the
+ 	 *  reader process may not have drained the data yet!
+diff --git a/net/ipv4/tcp_input.c b/net/ipv4/tcp_input.c
+index a5fdf81..227a5fe 100644
+--- a/net/ipv4/tcp_input.c
++++ b/net/ipv4/tcp_input.c
+@@ -496,6 +496,9 @@ void tcp_rcv_space_adjust(struct sock *sk)
+ 	int time;
+ 	int space;
+ 
++	if (sk->sk_friend)
++		return;
++
+ 	if (tp->rcvq_space.time == 0)
+ 		goto new_measure;
+ 
+@@ -4269,8 +4272,9 @@ static int tcp_prune_queue(struct sock *sk);
+ 
+ static inline int tcp_try_rmem_schedule(struct sock *sk, unsigned int size)
+ {
+-	if (atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
+-	    !sk_rmem_schedule(sk, size)) {
++	if (!sk->sk_friend &&
++		(atomic_read(&sk->sk_rmem_alloc) > sk->sk_rcvbuf ||
++	    !sk_rmem_schedule(sk, size))) {
+ 
+ 		if (tcp_prune_queue(sk) < 0)
+ 			return -1;
+@@ -5418,6 +5422,16 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
+ 		 *    state to ESTABLISHED..."
+ 		 */
+ 
++		if (skb->friend) {
++			/*
++			 * If friends haven't been made yet, our sk_friend
++			 * still == NULL, then update with the ACK's friend
++			 * value (the listen()er's sock addr) which is used
++			 * as a place holder.
++			 */
++			(void)cmpxchg(&sk->sk_friend, NULL, skb->friend);
++		}
++
+ 		TCP_ECN_rcv_synack(tp, th);
+ 
+ 		tp->snd_wl1 = TCP_SKB_CB(skb)->seq;
+@@ -5493,9 +5507,9 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
+ 			sk_wake_async(sk, SOCK_WAKE_IO, POLL_OUT);
+ 		}
+ 
+-		if (sk->sk_write_pending ||
++		if (!skb->friend && (sk->sk_write_pending ||
+ 		    icsk->icsk_accept_queue.rskq_defer_accept ||
+-		    icsk->icsk_ack.pingpong) {
++		    icsk->icsk_ack.pingpong)) {
+ 			/* Save one ACK. Data will be ready after
+ 			 * several ticks, if write_pending is set.
+ 			 *
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index 7f6ee22..af57472 100644
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -1258,6 +1258,8 @@ int tcp_v4_conn_request(struct sock *sk, struct sk_buff *skb)
+ 	tcp_rsk(req)->af_specific = &tcp_request_sock_ipv4_ops;
+ #endif
+ 
++	req->friend = skb->friend;
++
+ 	tcp_clear_options(&tmp_opt);
+ 	tmp_opt.mss_clamp = 536;
+ 	tmp_opt.user_mss  = tcp_sk(sk)->rx_opt.user_mss;
+diff --git a/net/ipv4/tcp_minisocks.c b/net/ipv4/tcp_minisocks.c
+index a94f1a3..a38de51 100644
+--- a/net/ipv4/tcp_minisocks.c
++++ b/net/ipv4/tcp_minisocks.c
+@@ -279,6 +279,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
+ 
+ 	tcp_death_row.period = sysctl_tcp_tw_timeout / INET_TWDR_TWKILL_SLOTS;
+ 
++	if (sk->sk_friend)
++		goto out;
++
+ 	if (tcp_death_row.sysctl_tw_recycle && tp->rx_opt.ts_recent_stamp)
+ 		recycle_ok = icsk->icsk_af_ops->remember_stamp(sk);
+ 
+@@ -357,6 +360,7 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
+ 	}
+ 
+ 	tcp_update_metrics(sk);
++out:
+ 	tcp_done(sk);
+ }
+ 
+diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
+index b7f11dd..e31bdc8 100644
+--- a/net/ipv4/tcp_output.c
++++ b/net/ipv4/tcp_output.c
+@@ -59,6 +59,9 @@ int sysctl_tcp_base_mss __read_mostly = 512;
+ /* By default, RFC2861 behavior.  */
+ int sysctl_tcp_slow_start_after_idle __read_mostly = 1;
+ 
++/* By default, TCP loopback bypass */
++int sysctl_tcp_friends __read_mostly = 0;
++
+ /* Account for new data that has been sent to the network. */
+ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
+ {
+@@ -644,9 +647,12 @@ static int tcp_transmit_skb(struct sock *sk, struct sk_buff *skb, int clone_it,
+ 	tcb = TCP_SKB_CB(skb);
+ 	memset(&opts, 0, sizeof(opts));
+ 
+-	if (unlikely(tcb->flags & TCPCB_FLAG_SYN))
++	if (unlikely(tcb->flags & TCPCB_FLAG_SYN)) {
++		/* Only try to make friends if enabled */
++		if (sysctl_tcp_friends)
++			skb->friend = sk;
+ 		tcp_options_size = tcp_syn_options(sk, skb, &opts, &md5);
+-	else
++	} else
+ 		tcp_options_size = tcp_established_options(sk, skb, &opts,
+ 							   &md5);
+ 	tcp_header_size = tcp_options_size + sizeof(struct tcphdr);
+@@ -2264,6 +2270,11 @@ struct sk_buff *tcp_make_synack(struct sock *sk, struct dst_entry *dst,
+ 	}
+ 
+ 	memset(&opts, 0, sizeof(opts));
++
++	/* Only try to make friends if enabled */
++	if (sysctl_tcp_friends)
++		skb->friend = sk;
++
+ #ifdef CONFIG_SYN_COOKIES
+ 	if (unlikely(req->cookie_ts))
+ 		TCP_SKB_CB(skb)->when = cookie_init_timestamp(req);
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index e770cf8..e0b4bc1 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -1202,6 +1202,7 @@ static int tcp_v6_conn_request(struct sock *sk, struct sk_buff *skb)
+ 	tcp_rsk(req)->af_specific = &tcp_request_sock_ipv6_ops;
+ #endif
+ 
++	req->friend = skb->friend;
+ 	tcp_clear_options(&tmp_opt);
+ 	tmp_opt.mss_clamp = IPV6_MIN_MTU - sizeof(struct tcphdr) - sizeof(struct ipv6hdr);
+ 	tmp_opt.user_mss = tp->rx_opt.user_mss;

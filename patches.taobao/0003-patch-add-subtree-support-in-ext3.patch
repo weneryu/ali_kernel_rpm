@@ -1,0 +1,589 @@
+Subject: [PATCH 3/4] Ext3: implement subtree id support for ext3 filesystem
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline: never
+References: 
+
+* Abstract
+  A subtree of a directory tree T is a tree consisting of a directory
+  (the subtree root) in T and all of its descendants in T.
+
+  *NOTE*: User is allowed to break pure subtree hierarchy via manual
+          id manipulation.
+
+  Subtree subtrees assumptions:
+  (1) Each inode has an id. This id is persistently stored inside
+      inode (xattr, usually inside ibody)
+  (2) Subtree id is inherent from parent directory
+
+  This feature is similar to project-id in XFS. One may assign some id to
+  a subtree. Each entry from the subtree may be accounted in directory
+  subtree quota. Will appear in later patches.
+
+* Disk layout
+  Subtree id is stored on disk inside xattr usually inside ibody.
+  Xattr is used only as a data storage, It has not user visible xattr
+  interface.
+
+* User interface
+  Subtree id is accessible via generic xattr interface "system.subtree"
+
+* Notes
+  ext3_setattr interface to subtreeid: Semantically subtree id must being
+changed
+  similar to uid/gid, but subtree id is stored inside xattr so on-disk
+  structures updates is not that trivial, so I've move subtree change
+  logic to separate function.
+
+
+[notes: desige changed]
+We dig a hole [2^24, 2^32-1] in gid namespace for our dir id, so there's
+no such thing as SBTRQUOTA, which also requires that the valid dir ids
+be larger than or equal to 2^24.
+Set some inode's 'system.subtree' xattr to a non-zero value (range from 
+2^24 to 2^32-1) to activate dir quota.
+Set some inode's 'system.subtree' xattr to zero to disable its dir quota
+accounting and limition, the accounting would transfer back to its standard
+group quota according its inode.i_gid
+
+
+Signed-off-by: Dmitry Monakhov <dmonakhov@openvz.org>
+Signed-off-by: Zheng Liu <wenqing.lz@taobao.com>
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/fs/ext3/Kconfig b/fs/ext3/Kconfig
+index 522b154..2677458 100644
+
+Acked-by: 
+
+--- a/fs/ext3/Kconfig
++++ b/fs/ext3/Kconfig
+@@ -86,3 +86,15 @@ config EXT3_FS_SECURITY
+ 
+ 	  If you are not using a security module that requires using
+ 	  extended attributes for file security labels, say N.
++
++config EXT3_FS_SUBTREE
++	bool "Ext3 Subtree Id Support"
++	select SUBTREE
++	depends on EXT3_FS_XATTR
++	help
++	  Enables subtree inode identifier support for ext3 filesystem.
++	  This feautre allow to assign extented inode's identifier similar to
++	  uid/gid. Value is stored in xattr "system.subtree" and may be used
++	  as additional quota limit.
++
++	  If unsure, say N.
+diff --git a/fs/ext3/Makefile b/fs/ext3/Makefile
+index e77766a..b569130 100644
+--- a/fs/ext3/Makefile
++++ b/fs/ext3/Makefile
+@@ -10,3 +10,4 @@ ext3-y	:= balloc.o bitmap.o dir.o file.o fsync.o ialloc.o inode.o \
+ ext3-$(CONFIG_EXT3_FS_XATTR)	 += xattr.o xattr_user.o xattr_trusted.o
+ ext3-$(CONFIG_EXT3_FS_POSIX_ACL) += acl.o
+ ext3-$(CONFIG_EXT3_FS_SECURITY)	 += xattr_security.o
++ext3-$(CONFIG_EXT3_FS_SUBTREE)	 += subtree.o
+diff --git a/fs/ext3/ialloc.c b/fs/ext3/ialloc.c
+index 2bcae0f..be41ff1 100644
+--- a/fs/ext3/ialloc.c
++++ b/fs/ext3/ialloc.c
+@@ -29,6 +29,7 @@
+ 
+ #include "xattr.h"
+ #include "acl.h"
++#include "subtree.h"
+ 
+ /*
+  * ialloc.c contains the inodes allocation and deallocation routines
+@@ -595,6 +596,8 @@ got:
+ 		ei->i_extra_isize = 0;
+ 	}
+ 
++	ext3_set_subtree(inode, ext3_get_subtree(dir));
++
+ 	ret = inode;
+ 	if (vfs_dq_alloc_inode(inode)) {
+ 		err = -EDQUOT;
+@@ -609,6 +612,12 @@ got:
+ 	if (err)
+ 		goto fail_free_drop;
+ 
++	if (ext3_get_subtree(dir)) {
++		err = ext3_subtree_init(handle, inode);
++		if (err)
++			goto fail_free_drop;
++	}
++
+ 	err = ext3_mark_inode_dirty(handle, inode);
+ 	if (err) {
+ 		ext3_std_error(sb, err);
+diff --git a/fs/ext3/inode.c b/fs/ext3/inode.c
+index 75b6f93..4625ce3 100644
+--- a/fs/ext3/inode.c
++++ b/fs/ext3/inode.c
+@@ -41,6 +41,7 @@
+ #include <trace/events/ext3.h>
+ #include "xattr.h"
+ #include "acl.h"
++#include "subtree.h"
+ 
+ static int ext3_writepage_trans_blocks(struct inode *inode);
+ 
+@@ -2966,6 +2967,10 @@ struct inode *ext3_iget(struct super_block *sb, unsigned long ino)
+ 	} else
+ 		ei->i_extra_isize = 0;
+ 
++	ret = ext3_subtree_read(inode);
++	if (ret)
++		goto bad_inode;
++
+ 	if (S_ISREG(inode->i_mode)) {
+ 		inode->i_op = &ext3_file_inode_operations;
+ 		inode->i_fop = &ext3_file_operations;
+diff --git a/fs/ext3/subtree.c b/fs/ext3/subtree.c
+new file mode 100644
+index 0000000..4c4aab1
+--- /dev/null
++++ b/fs/ext3/subtree.c
+@@ -0,0 +1,273 @@
++/*
++ * linux/fs/ext3/subtree.c
++ *
++ * Copyright (C) 2012 Parallels Inc
++ * Dmitry Monakhov <dmonakhov@openvz.org>
++ */
++
++#include <linux/init.h>
++#include <linux/sched.h>
++#include <linux/slab.h>
++#include <linux/capability.h>
++#include <linux/fs.h>
++#include <linux/quotaops.h>
++#include <linux/ext3_jbd.h>
++#include <linux/ext3_fs.h>
++#include <linux/xattr.h>
++#include <linux/pid_namespace.h>
++#include "xattr.h"
++#include "subtree.h"
++
++/*
++ * Subtree assumptions:
++ * (1) Each inode has subtree id. This id is persisitently stored inside
++ *     inode's xattr, usually inside ibody
++ * (2) Subtree id is inherent from parent directory
++ */
++
++/*
++ * Read subtree id from inode's xattr
++ * Locking: none
++ */
++int ext3_subtree_xattr_read(struct inode *inode, unsigned int *subtree)
++{
++	__le32 dsk_subtree;
++	int retval;
++
++	retval = ext3_xattr_get(inode, EXT3_XATTR_INDEX_SUBTREE, "",
++				&dsk_subtree, sizeof(dsk_subtree));
++	if (retval > 0) {
++		if (retval != sizeof(dsk_subtree))
++			return -EIO;
++		else
++			retval = 0;
++	}
++	*subtree = le32_to_cpu(dsk_subtree);
++	return retval;
++}
++
++/*
++ * Save subtree id to inode's xattr
++ * Locking: none
++ */
++int ext3_subtree_xattr_write(handle_t *handle, struct inode *inode,
++			     unsigned int subtree, int xflags)
++{
++	__le32 dskid = cpu_to_le32(subtree);
++	int retval;
++
++	retval = ext3_xattr_set_handle(handle, inode,
++				       EXT3_XATTR_INDEX_SUBTREE, "",
++				       &dskid, sizeof(dskid), xflags);
++	if (retval > 0) {
++		if (retval != sizeof(dskid))
++			retval = -EIO;
++		else
++			retval = 0;
++	}
++	return retval;
++}
++
++/*
++ * Change subtree id
++ * Locking: Called under inode->i_mutex
++ */
++int ext3_subtree_change(struct inode *inode, unsigned int new_subtree)
++{
++	handle_t *handle;
++	int ret = 0, ret2 = 0;
++	unsigned credits, retries = 0;
++	struct dquot *new_dquot[MAXQUOTAS] = {};
++	struct dquot *old_dquot[MAXQUOTAS] = {};
++	int old_subtree, new_dq_id;
++
++	if (!sb_has_quota_active(inode->i_sb, GRPQUOTA)) {
++		ret = -EOPNOTSUPP;
++		goto out;
++	}
++	
++	/* if dir_id == 0 before, this inode is accounted in its standard
++	 * group quota
++	 */
++	old_subtree = ext3_get_subtree(inode);
++
++	BUG_ON(!IS_SBTR_ID(new_subtree));
++
++	/* To set dir_id == 0 means we want to cancel the dir quota
++	 * accounting, so we shall give it back to the original owner.
++	 */
++	if (!new_subtree)
++		new_dq_id = inode->i_gid;
++	else
++		new_dq_id = new_subtree;
++
++	/*
++	 * One data_trans_blocks chunk for xattr update.
++	 * One quota_trans_blocks chunk for quota transfer, and one
++	 * quota_trans_block chunk for emergency quota rollback transfer,
++	 * because quota rollback may result new quota blocks allocation.
++	 */
++	credits = EXT3_DATA_TRANS_BLOCKS(inode->i_sb) +
++		  EXT3_QUOTA_TRANS_BLOCKS(inode->i_sb) * 2;
++
++	vfs_dq_init(inode);
++
++	old_dquot[GRPQUOTA] = inode->i_dquot[GRPQUOTA];
++	new_dquot[GRPQUOTA] = dqget(inode->i_sb, new_dq_id, GRPQUOTA);
++	
++	ret = 0;
++
++	if (unlikely(!new_dquot[GRPQUOTA]))
++		goto out;
++
++	if (unlikely(!old_dquot[GRPQUOTA] ||
++		old_dquot[GRPQUOTA] == new_dquot[GRPQUOTA])) {
++		goto out_drop_dquot;
++	}
++
++retry:
++	handle = ext3_journal_start(inode, credits);
++	if (IS_ERR(handle)) {
++		ret = PTR_ERR(handle);
++		ext3_std_error(inode->i_sb, ret);
++		goto out_drop_dquot;
++	}
++	/* Inode may not have subtree xattr yet. Create it explicitly */
++	ret = ext3_subtree_xattr_write(handle, inode, old_subtree, XATTR_CREATE);
++	if (ret == -EEXIST)
++		ret = 0;
++	if (ret) {
++		ret2 = ext3_journal_stop(handle);
++		if (ret2) {
++			ret = ret2;
++			goto out_drop_dquot;
++		}
++		if (ret == -ENOSPC &&
++		    ext3_should_retry_alloc(inode->i_sb, &retries))
++			goto retry;
++		else
++			goto out_drop_dquot;
++	}
++
++	ret = __dquot_transfer(inode, new_dquot);
++	/* if __dquot_transfer() fails, new_dquot[] keeps untouched. just
++	 * release it and quit,
++	 * if __dquot_transfer() success, new_dquot[] is assigned to
++	 * old_dquot[]. Because it might need fall back later, we don't
++	 * release new_dquot[] now. This 'new_dquot[]' should be released
++	 * after the xattr is also corrected.
++	 * N.B In the later case new_dquot[] has been lost.
++	 */
++	if (ret) {
++		ret = -EDQUOT;
++		goto out_journal;
++	}
++
++	ret = ext3_subtree_xattr_write(handle, inode, new_subtree,
++				       XATTR_REPLACE);
++	if (ret) {
++		/*
++		 * Function may fail only due to fatal error, nor than less
++		 * we have tried to rollback quota changes.
++		 */
++		/* This 'new_dquot' is the same with old_dquot */
++		__dquot_transfer(inode, new_dquot);
++		ext3_std_error(inode->i_sb, ret);
++	} else 
++		ext3_set_subtree(inode, new_subtree);
++
++out_journal:
++	ret2 = ext3_journal_stop(handle);
++out_drop_dquot:
++	dqput(new_dquot[GRPQUOTA]);
++out:
++	if (ret2)
++		ret = ret2;
++	return ret;
++}
++
++int ext3_subtree_read(struct inode *inode)
++{
++	int ret = 0;
++	int subtree = 0;
++
++	ret = ext3_subtree_xattr_read(inode, &subtree);
++	if (ret == -ENODATA) {
++		subtree = 0;
++		ret = 0;
++	}
++	if (!ret)
++		ext3_set_subtree(inode, subtree);
++	return ret;
++}
++
++/*
++ * Initialize the subtree xattr of a new inode. Called from ext3_new_inode.
++ *
++ * Locking:
++ *   dir->i_mutex: down
++ *   inode->i_mutex: up (access to inode is still exclusive)
++ * Note: caller must assign correct subtree id to inode before.
++ */
++int ext3_subtree_init(handle_t *handle, struct inode *inode)
++{
++	return ext3_subtree_xattr_write(handle, inode,
++					EXT3_I(inode)->i_subtree,
++					XATTR_CREATE);
++}
++
++static size_t
++ext3_xattr_subtree_list(struct inode *inode, char *list, size_t list_size,
++			const char *name, size_t name_len)
++{
++	if (list && XATTR_SUBTREE_LEN <= list_size)
++		memcpy(list, XATTR_SUBTREE, XATTR_SUBTREE_LEN);
++	return XATTR_SUBTREE_LEN;
++}
++
++static int
++ext3_xattr_subtree_get(struct inode *inode, const char *name,
++		       void *buffer, size_t size)
++{
++	int ret;
++	unsigned subtree;
++	char buf[32];
++
++	if (strcmp(name, "") != 0)
++		return -EINVAL;
++	ret = ext3_subtree_xattr_read(inode, &subtree);
++	if (ret)
++		return ret;
++	snprintf(buf, sizeof(buf) - 1, "%u", subtree);
++	buf[31] = '\0';
++	strncpy(buffer, buf, size);
++	return strlen(buf);
++}
++
++static int
++ext3_xattr_subtree_set(struct inode *inode, const char *name,
++		       const void *value, size_t size, int flags)
++{
++	unsigned long new_subtree;
++	char buf[11];
++	if (strcmp(name, "") != 0 || size + 1 > sizeof(buf))
++		return -EINVAL;
++		
++	memcpy(buf, (char *)value, size);
++	buf[size] = '\0';
++	if (strict_strtoul(buf, 10, &new_subtree))
++		return -EINVAL;
++	if (!IS_SBTR_ID(new_subtree)) {
++		printk(KERN_WARNING "the min valid subtree id is 0x%x, or 0\n",
++		       SBTR_MIN_ID);
++		return -EINVAL;
++	}
++	return ext3_subtree_change(inode, new_subtree);
++}
++
++struct xattr_handler ext3_xattr_subtree_handler = {
++	.prefix = XATTR_SUBTREE,
++	.list	= ext3_xattr_subtree_list,
++	.get	= ext3_xattr_subtree_get,
++	.set	= ext3_xattr_subtree_set,
++};
+diff --git a/fs/ext3/subtree.h b/fs/ext3/subtree.h
+new file mode 100644
+index 0000000..dca913e
+--- /dev/null
++++ b/fs/ext3/subtree.h
+@@ -0,0 +1,40 @@
++#include <linux/xattr.h>
++#include <linux/fs.h>
++
++#ifdef CONFIG_EXT3_FS_SUBTREE
++extern int ext3_subtree_xattr_read(struct inode *inode, unsigned int *subtree);
++extern int ext3_subtree_xattr_write(handle_t *handle, struct inode *inode,
++				    unsigned int subtree, int xflags);
++extern int ext3_subtree_init(handle_t *handle, struct inode *inode);
++extern int ext3_subtree_read(struct inode *inode);
++extern int ext3_subtree_change(struct inode *inode, unsigned int new_subtree);
++static inline u32 ext3_get_subtree(const struct inode *inode)
++{
++	const struct ext3_inode_info *ei =
++		container_of(inode, const struct ext3_inode_info, vfs_inode);
++	return ei->i_subtree;
++}
++static inline void ext3_set_subtree(struct inode *inode, u32 id)
++{
++	EXT3_I(inode)->i_subtree = id;
++}
++#else /* !CONFIG_EXT3_FS_SUBTREE */
++#define ext3_get_subtree(inode) do {} while (0)
++#define ext3_set_subtree(inode, id) do {} while (0)
++static inline int ext3_subtree_xattr_read(struct inode *inode, unsigned int *id)
++{
++	return -ENOTSUPP;
++}
++static inline int ext3_subtree_init(handle_t *handle, struct inode *inode)
++{
++	return 0;
++}
++static inline int ext3_subtree_read(struct inode *inode)
++{
++	return 0;
++}
++static inline int ext3_subtree_change(struct inode *inode, unsigned int id)
++{
++	return -ENOTSUPP;
++}
++#endif /* CONFIG_EXT3_FS_SUBTREE */
+diff --git a/fs/ext3/super.c b/fs/ext3/super.c
+index 7a7cc19..89b16bf 100644
+--- a/fs/ext3/super.c
++++ b/fs/ext3/super.c
+@@ -43,6 +43,7 @@
+ #include "xattr.h"
+ #include "acl.h"
+ #include "namei.h"
++#include "subtree.h"
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/ext3.h>
+@@ -803,6 +804,9 @@ static const struct super_operations ext3_sops = {
+ 	.quota_write	= ext3_quota_write,
+ #endif
+ 	.bdev_try_to_free_page = bdev_try_to_free_page,
++#ifdef CONFIG_EXT3_FS_SUBTREE
++	.get_subtree	= ext3_get_subtree,
++#endif
+ };
+ 
+ static const struct export_operations ext3_export_ops = {
+diff --git a/fs/ext3/xattr.c b/fs/ext3/xattr.c
+index 387d92d..8d1a1d5 100644
+--- a/fs/ext3/xattr.c
++++ b/fs/ext3/xattr.c
+@@ -114,6 +114,9 @@ static struct xattr_handler *ext3_xattr_handler_map[] = {
+ #ifdef CONFIG_EXT3_FS_SECURITY
+ 	[EXT3_XATTR_INDEX_SECURITY]	     = &ext3_xattr_security_handler,
+ #endif
++#ifdef CONFIG_EXT3_FS_SUBTREE
++	[EXT3_XATTR_INDEX_SUBTREE]	     = &ext3_xattr_subtree_handler,
++#endif
+ };
+ 
+ struct xattr_handler *ext3_xattr_handlers[] = {
+@@ -126,6 +129,9 @@ struct xattr_handler *ext3_xattr_handlers[] = {
+ #ifdef CONFIG_EXT3_FS_SECURITY
+ 	&ext3_xattr_security_handler,
+ #endif
++#ifdef CONFIG_EXT3_FS_SUBTREE
++	&ext3_xattr_subtree_handler,
++#endif
+ 	NULL
+ };
+ 
+diff --git a/fs/ext3/xattr.h b/fs/ext3/xattr.h
+index 148a4df..09e0df8 100644
+--- a/fs/ext3/xattr.h
++++ b/fs/ext3/xattr.h
+@@ -21,6 +21,7 @@
+ #define EXT3_XATTR_INDEX_TRUSTED		4
+ #define	EXT3_XATTR_INDEX_LUSTRE			5
+ #define EXT3_XATTR_INDEX_SECURITY	        6
++#define EXT3_XATTR_INDEX_SUBTREE		7
+ 
+ struct ext3_xattr_header {
+ 	__le32	h_magic;	/* magic number for identification */
+@@ -63,6 +64,7 @@ extern struct xattr_handler ext3_xattr_trusted_handler;
+ extern struct xattr_handler ext3_xattr_acl_access_handler;
+ extern struct xattr_handler ext3_xattr_acl_default_handler;
+ extern struct xattr_handler ext3_xattr_security_handler;
++extern struct xattr_handler ext3_xattr_subtree_handler;
+ 
+ extern ssize_t ext3_listxattr(struct dentry *, char *, size_t);
+ 
+diff --git a/fs/quota/dquot.c b/fs/quota/dquot.c
+index f3d63c1..a2b78dd 100644
+--- a/fs/quota/dquot.c
++++ b/fs/quota/dquot.c
+@@ -1733,7 +1733,7 @@ int __dquot_transfer(struct inode *inode, struct dquot **transfer_to)
+ 	qsize_t rsv_space = 0;
+ 	struct dquot *transfer_from[MAXQUOTAS] = {};
+ 	char is_valid[MAXQUOTAS] = {};
+-	int cnt, ret = 0;
++	int cnt, ret = QUOTA_OK;
+ 	char warntype_to[MAXQUOTAS];
+ 	char warntype_from_inodes[MAXQUOTAS], warntype_from_space[MAXQUOTAS];
+ 
+@@ -1806,6 +1806,8 @@ int __dquot_transfer(struct inode *inode, struct dquot **transfer_to)
+ 		if (transfer_to[cnt])
+ 			mark_dquot_dirty(transfer_to[cnt]);
+ 	}
++
++warn_put_all:
+ 	flush_warnings(transfer_to, warntype_to);
+ 	flush_warnings(transfer_from, warntype_from_inodes);
+ 	flush_warnings(transfer_from, warntype_from_space);
+@@ -1814,15 +1816,15 @@ put_all:
+ 		if (is_valid[cnt])
+ 			transfer_to[cnt] = transfer_from[cnt];
+ 	}
+-	return 0;
++	return ret;
+ over_quota:
+ 	spin_unlock(&dq_data_lock);
+ 	up_write(&sb_dqopt(inode->i_sb)->dqptr_sem);
+-	flush_warnings(transfer_to, warntype_to);
+-	flush_warnings(transfer_from, warntype_from_inodes);
+-	flush_warnings(transfer_from, warntype_from_space);
++	/* Clear dquot pointers we don't want to dqput() nor warn */
++	for (cnt = 0; cnt < MAXQUOTAS; cnt++)
++		transfer_from[cnt] = NULL;
+ 	ret = NO_QUOTA;
+-	return ret;
++	goto warn_put_all;
+ }
+ EXPORT_SYMBOL(__dquot_transfer);
+ 
+diff --git a/include/linux/ext3_fs_i.h b/include/linux/ext3_fs_i.h
+index 93e7428..6b1236b 100644
+--- a/include/linux/ext3_fs_i.h
++++ b/include/linux/ext3_fs_i.h
+@@ -146,6 +146,10 @@ struct ext3_inode_info {
+ 	atomic_t i_datasync_tid;
+ 
+ 	struct inode vfs_inode;
++
++#ifdef CONFIG_EXT3_FS_SUBTREE
++	__u32 i_subtree;
++#endif
+ };
+ 
+ #endif	/* _LINUX_EXT3_FS_I */

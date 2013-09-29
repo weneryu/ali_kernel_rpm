@@ -1,0 +1,28 @@
+From: Tao Ma <boyu.mt@taobao.com>
+Subject: Avoid netoops panic when the configuration is wrong.
+Patch-mainline: In house
+References: 
+
+In some cases, when netoops is configured in a wrong way, it will
+panic by itself. So add some extra check there so it wouldn't
+cause the system panic.
+
+Signed-off-by: Tao Ma <boyu.mt@taobao.com>
+Acked-by: 
+
+Index: linux-2.6.32-220.23.2.el5/drivers/net/netoops.c
+===================================================================
+--- linux-2.6.32-220.23.2.el5.orig/drivers/net/netoops.c	2013-07-09 16:52:55.000000000 +0800
++++ linux-2.6.32-220.23.2.el5/drivers/net/netoops.c	2013-07-10 10:48:34.000000000 +0800
+@@ -149,6 +149,11 @@
+ 	msg.header.packet_no = cpu_to_le32(packet_nr);
+ 
+ 	list_for_each_entry(nt, &targets.list, list) {
++		if (!nt->np.dev) {
++			printk(KERN_WARNING "Warning: netoops nt->np.dev is NULL, state %d\n",
++				nt->np_state);
++			continue;
++		}
+ 		if (nt->np_state == NETPOLL_ENABLED
+ 		    && netif_running(nt->np.dev)) {
+ 			netpoll_send_udp(&nt->np, (char *)&msg, sizeof(msg));

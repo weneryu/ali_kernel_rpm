@@ -1,0 +1,176 @@
+Subject: sched: instance-aware context switches
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline: never
+References: 
+
+This commit makes the context switch counter instance aware.
+
+By saying 'context switch', we mean the process switch from
+the previous task (prev) to the next task (next). And we
+define 'container context switch' like this:
+task_ca(prev)->nr_switches[cpu]++
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 7fbe62c..7f208ee 100644
+
+Acked-by: 
+
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -121,6 +121,21 @@
+  */
+ #define RUNTIME_INF	((u64)~0ULL)
+ 
++#ifdef CONFIG_CGROUP_CPUACCT
++/* track cpu usage of a group of tasks and its child groups */
++struct cpuacct {
++	struct cgroup_subsys_state css;
++	/* cpuusage holds pointer to a u64-type object on every cpu */
++	u64 *cpuusage;
++	struct kernel_cpustat __percpu *cpustat;
++	unsigned long *nr_uninterruptible;
++	unsigned long *nr_running;
++	unsigned long avenrun[3];
++	struct cpuacct *parent;
++	u64 *nr_switches;
++};
++#endif
++
+ static inline int rt_policy(int policy)
+ {
+ 	if (unlikely(policy == SCHED_FIFO || policy == SCHED_RR))
+@@ -3103,12 +3118,20 @@ unsigned long nr_uninterruptible(void)
+ 	return sum;
+ }
+ 
++extern bool task_in_nonroot_cpuacct(struct task_struct *tsk);
++static inline struct cpuacct *task_ca(struct task_struct *tsk);
+ void nr_context_switches_cpu(struct seq_file *p)
+ {
+ 	int i;
+ 
+-	for_each_possible_cpu(i)
+-		seq_printf(p, " %llu", cpu_rq(i)->nr_switches);
++	if (task_in_nonroot_cpuacct(current) &&
++		in_noninit_pid_ns(current->nsproxy->pid_ns)) {
++		struct cpuacct *ca = task_ca(current);
++		for_each_possible_cpu(i)
++			seq_printf(p, " %llu", *per_cpu_ptr(ca->nr_switches, i));
++	} else
++		for_each_possible_cpu(i)
++			seq_printf(p, " %llu", cpu_rq(i)->nr_switches);
+ }
+ 
+ unsigned long long nr_context_switches(void)
+@@ -3116,8 +3139,14 @@ unsigned long long nr_context_switches(void)
+ 	int i;
+ 	unsigned long long sum = 0;
+ 
+-	for_each_possible_cpu(i)
+-		sum += cpu_rq(i)->nr_switches;
++	if (task_in_nonroot_cpuacct(current) &&
++		in_noninit_pid_ns(current->nsproxy->pid_ns)) {
++		struct cpuacct *ca = task_ca(current);
++		for_each_possible_cpu(i)
++			sum += *per_cpu_ptr(ca->nr_switches, i);
++	} else
++		for_each_possible_cpu(i)
++			sum += cpu_rq(i)->nr_switches;
+ 
+ 	return sum;
+ }
+@@ -5667,17 +5696,6 @@ unsigned long long thread_group_sched_runtime(struct task_struct *p)
+ struct cgroup_subsys cpuacct_subsys;
+ struct cpuacct root_cpuacct;
+ 
+-/* track cpu usage of a group of tasks and its child groups */
+-struct cpuacct {
+-	struct cgroup_subsys_state css;
+-	/* cpuusage holds pointer to a u64-type object on every cpu */
+-	u64 *cpuusage;
+-	struct kernel_cpustat __percpu *cpustat;
+-	unsigned long *nr_uninterruptible;
+-	unsigned long *nr_running;
+-	unsigned long avenrun[3];
+-	struct cpuacct *parent;
+-};
+ 
+ /* return cpu accounting group to which this task belongs */
+ static inline struct cpuacct *task_ca(struct task_struct *tsk)
+@@ -6359,6 +6377,10 @@ need_resched_nonpreemptible:
+ 		perf_event_task_sched_out(prev, next);
+ 
+ 		rq->nr_switches++;
++		if (task_in_nonroot_cpuacct(prev)) {
++			struct cpuacct *ca = task_ca(prev);
++			(*this_cpu_ptr(ca->nr_switches))++;
++		}
+ 		rq->curr = next;
+ 		++*switch_count;
+ 
+@@ -11855,10 +11877,13 @@ static struct cgroup_subsys_state *cpuacct_create(
+ 	ca = kzalloc(sizeof(*ca), GFP_KERNEL);
+ 	if (!ca)
+ 		goto out;
++	ca->nr_switches = alloc_percpu(u64);
++	if (!ca->nr_switches)
++		goto out_free_ca;
+ 
+ 	ca->cpuusage = alloc_percpu(u64);
+ 	if (!ca->cpuusage)
+-		goto out_free_ca;
++		goto out_free_nr_switches;
+ 
+ 	ca->cpustat = alloc_percpu(struct kernel_cpustat);
+ 	if (!ca->cpustat)
+@@ -11899,6 +11924,8 @@ out_free_uninter:
+ 	free_percpu(ca->cpustat);
+ out_free_cpuusage:
+ 	free_percpu(ca->cpuusage);
++out_free_nr_switches:
++	free_percpu(ca->nr_switches);
+ out_free_ca:
+ 	kfree(ca);
+ out:
+@@ -11915,6 +11942,7 @@ cpuacct_destroy(struct cgroup_subsys *ss, struct cgroup *cgrp)
+ 	free_percpu(ca->nr_uninterruptible);
+ 	free_percpu(ca->cpustat);
+ 	free_percpu(ca->cpuusage);
++	free_percpu(ca->nr_switches);
+ 	free_css_id(&cpuacct_subsys, &ca->css);
+ 	kfree(ca);
+ }
+@@ -12136,7 +12164,8 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ {
+ 	struct cpuacct *ca = cgroup_ca(cgrp);
+ 	u64 user, nice, system, idle, iowait, irq, softirq, steal, guest, load;
+-	int cpu;
++	u64 nr_switches = 0;
++	int cpu, i;
+ 	struct kernel_cpustat *kcpustat;
+ 	struct cpumask cpus_allowed;
+ 	unsigned long avnrun[3];
+@@ -12204,6 +12233,13 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 		nr_uninter = nr_uninterruptible();
+ 	}
+ 
++	if (ca != &root_cpuacct)
++		for_each_possible_cpu(i)
++			nr_switches += *per_cpu_ptr(ca->nr_switches, i);
++	else
++		for_each_possible_cpu(i)
++			nr_switches += cpu_rq(i)->nr_switches;
++
+ 	cb->fill(cb, "user", cputime64_to_clock_t(user));
+ 	cb->fill(cb, "nice", cputime64_to_clock_t(nice));
+ 	cb->fill(cb, "system", cputime64_to_clock_t(system));
+@@ -12222,6 +12258,7 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 	cb->fill(cb, "load average(15min)", load);
+ 	cb->fill(cb, "nr_running", (u64)nr_run);
+ 	cb->fill(cb, "nr_uninterrupible", (u64)nr_uninter);
++	cb->fill(cb, "nr_switches", (u64)nr_switches);
+ 
+ 	return 0;
+ }

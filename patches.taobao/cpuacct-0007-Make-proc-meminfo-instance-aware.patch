@@ -1,0 +1,177 @@
+From 5f7f664ded740f45ab5c07cc479ec515cfb35530 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Fri, 1 Jun 2012 18:10:12 +0800
+Subject: [PATCH 7/9] Make /proc/meminfo instance-aware
+Patch-mainline: never
+References: 
+
+Since memcg does not account buffer usage, we simply set it to 0 to
+avoid rewind -/+ buffers/cache values. What's more, we set memcg's
+"total Swap" to min(global_total_swap, memsw.limit) to indicate the
+upper limit of swapping space.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ fs/proc/meminfo.c          |   30 ++++++++++++++++++--------
+ include/linux/memcontrol.h |    8 +++++++
+ mm/memcontrol.c            |   49 ++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 78 insertions(+), 9 deletions(-)
+
+diff --git a/fs/proc/meminfo.c b/fs/proc/meminfo.c
+index ed257d1..d7a937e 100644
+--- a/fs/proc/meminfo.c
++++ b/fs/proc/meminfo.c
+@@ -13,6 +13,7 @@
+ #include <asm/atomic.h>
+ #include <asm/page.h>
+ #include <asm/pgtable.h>
++#include <linux/pid_namespace.h>
+ #include "internal.h"
+ 
+ void __attribute__((weak)) arch_report_meminfo(struct seq_file *m)
+@@ -28,26 +29,37 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
+ 	long cached;
+ 	unsigned long pages[NR_LRU_LISTS];
+ 	int lru;
++	bool instance_view = false;
++	struct mem_cgroup *memcg = NULL;
++
++	if (in_noninit_pid_ns(current->nsproxy->pid_ns) &&
++	     !mem_cgroup_disabled()) {
++		instance_view = true;
++		memcg = mem_cgroup_from_task(current);
++	}
+ 
+ /*
+  * display in kilobytes.
+  */
+ #define K(x) ((x) << (PAGE_SHIFT - 10))
+-	si_meminfo(&i);
+-	si_swapinfo(&i);
++	if (!instance_view) {
++		si_meminfo(&i);
++		si_swapinfo(&i);
++		cached = global_page_state(NR_FILE_PAGES) -
++			total_swapcache_pages - i.bufferram;
++		if (cached < 0)
++			cached = 0;
++		for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
++			pages[lru] = global_page_state(NR_LRU_BASE + lru);
++	} else {
++		cgroup_mem_sw_info(&i, memcg, &cached, pages);
++	}
+ 	committed = percpu_counter_read_positive(&vm_committed_as);
+ 	allowed = ((totalram_pages - hugetlb_total_pages())
+ 		* sysctl_overcommit_ratio / 100) + total_swap_pages;
+ 
+-	cached = global_page_state(NR_FILE_PAGES) -
+-			total_swapcache_pages - i.bufferram;
+-	if (cached < 0)
+-		cached = 0;
+-
+ 	get_vmalloc_info(&vmi);
+ 
+-	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
+-		pages[lru] = global_page_state(NR_LRU_BASE + lru);
+ 
+ 	/*
+ 	 * Tagged format, for easy grepping and expansion.
+diff --git a/include/linux/memcontrol.h b/include/linux/memcontrol.h
+index a6e126d..2ca82f8 100644
+--- a/include/linux/memcontrol.h
++++ b/include/linux/memcontrol.h
+@@ -127,6 +127,8 @@ unsigned long mem_cgroup_soft_limit_reclaim(struct zone *zone, int order,
+ 
+ void mem_cgroup_split_hugepage_commit(struct page *page, struct page *head);
+ 
++extern void cgroup_mem_sw_info(struct sysinfo *val, struct mem_cgroup *mem_cont,
++		long *cached, unsigned long pages[]);
+ u64 mem_cgroup_get_limit(struct mem_cgroup *mem);
+ 
+ #else /* CONFIG_CGROUP_MEM_RES_CTLR */
+@@ -303,6 +305,12 @@ void mem_cgroup_split_hugepage_commit(struct page *page, struct page *head)
+ {
+ }
+ 
++void cgroup_mem_sw_info(struct sysinfo *val, struct mem_cgroup *mem_cont,
++		long *cached, unsigned long pages[]);
++{
++	return;
++}
++
+ static inline
+ u64 mem_cgroup_get_limit(struct mem_cgroup *mem)
+ {
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index d7f0528..16de778 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -40,6 +40,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/mm_inline.h>
+ #include <linux/page_cgroup.h>
++#include <linux/blkdev.h>
+ #include <linux/oom.h>
+ #include "internal.h"
+ 
+@@ -4077,6 +4078,54 @@ static void mem_cgroup_move_task(struct cgroup_subsys *ss,
+ }
+ #endif
+ 
++void cgroup_mem_sw_info(struct sysinfo *val, struct mem_cgroup *mem_cont,
++		long *cached, unsigned long pages[])
++
++{
++	unsigned long long limit, memsw_limit;
++	struct mcs_total_stat mystat;
++	int lru_global, lru_local;
++	u64 memsw_limit_pages;
++
++	memset(&mystat, 0, sizeof(mystat));
++	mem_cgroup_get_total_stat(mem_cont, &mystat);
++
++	memcg_get_hierarchical_limit(mem_cont, &limit, &memsw_limit);
++	val->totalram = limit >> PAGE_SHIFT;
++	val->sharedram = 0;
++	val->freeram = (limit - mystat.stat[MCS_CACHE] -
++				mystat.stat[MCS_RSS]) >> PAGE_SHIFT;
++	/* these are not accounted by memcg yet */
++	/* if give bufferram the global value, free may show a quite
++	 * large number in the +/-buffers/caches row, the reason is
++	 * it's equal to group_used - global_buffer - group_cached,
++	 * if global_buffer > group_used, we get a rewind large value.
++	 */
++	val->bufferram = 0;
++	val->totalhigh = totalhigh_pages;
++	val->freehigh = nr_free_highpages();
++	val->mem_unit = PAGE_SIZE;
++
++	*cached = mystat.stat[MCS_CACHE] >> PAGE_SHIFT;
++
++	/* fill in swinfo */
++	if (do_swap_account) {
++		si_swapinfo(val);
++		memsw_limit_pages = memsw_limit >> PAGE_SHIFT;
++		if (memsw_limit_pages < val->totalswap)
++			val->totalswap = memsw_limit_pages;
++		val->freeswap = val->totalswap -
++					(mystat.stat[MCS_SWAP] >> PAGE_SHIFT);
++	} else
++		si_swapinfo(val);
++
++	for (lru_local = MCS_INACTIVE_ANON, lru_global = LRU_BASE;
++			lru_global < NR_LRU_LISTS;
++			lru_local++, lru_global++)
++		pages[lru_global] = mystat.stat[lru_local] >> PAGE_SHIFT;
++	return;
++}
++
+ struct cgroup_subsys mem_cgroup_subsys = {
+ 	.name = "memory",
+ 	.subsys_id = mem_cgroup_subsys_id,
+-- 
+1.7.1
+

@@ -1,0 +1,27 @@
+Subject: Sched: remove the superfluous WARN_ON_ONCE()
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline:  never
+References: 
+
+We were not sure about that compution at that time, and it was
+proved to be unnecessary later.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 7f208ee..2f19486 100644
+
+Acked-by: 
+
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5799,10 +5799,8 @@ static int cpuacct_cgroup_calc_load(struct cpuacct *acct, void *data)
+ 		cpus_allowed = get_cs_cpu_allowed(cgrp);
+ 		for_each_cpu_and(cpu, cpu_online_mask, cpus_allowed) {
+ 			nrptr = per_cpu_ptr(acct->nr_uninterruptible, cpu);
+-			WARN_ON_ONCE(*nrptr > cpu_rq(cpu)->nr_uninterruptible);
+ 			active += *nrptr;
+ 			nrptr = per_cpu_ptr(acct->nr_running, cpu);
+-			WARN_ON_ONCE(*nrptr > cpu_rq(cpu)->nr_running);
+ 			active += *nrptr;
+ 		}
+ 		active = active > 0 ? active * FIXED_1 : 0;

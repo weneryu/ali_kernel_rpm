@@ -1,0 +1,37 @@
+From 6fa501f6a85c278da7974600f8ec2429f25c462f Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Tue, 5 Jun 2012 18:40:36 +0800
+Subject: [PATCH] Avoid wild pointer while reading /proc/loadavg inside lxc container
+Patch-mainline: in-house
+References: 
+
+While trying to get cpu_allowed from task by cpuset controller, we should
+check if it has cpuset mounted first.
+
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ fs/proc/loadavg.c |    5 +++--
+ 1 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/fs/proc/loadavg.c b/fs/proc/loadavg.c
+index 488bcf7..510e0fe 100644
+--- a/fs/proc/loadavg.c
++++ b/fs/proc/loadavg.c
+@@ -38,9 +38,10 @@ static int loadavg_proc_show(struct seq_file *m, void *v)
+ 		get_avenrun_from_tsk(current, avnrun, FIXED_1/200, 0);
+ 
+ 		cpumask_copy(&cpus_allowed, cpu_possible_mask);
+-		if (task_subsys_state(current, cpuset_subsys_id))
++		if (task_subsys_state(current, cpuset_subsys_id)) {
+ 			memset(&cpus_allowed, 0, sizeof(cpus_allowed));
+-		get_tsk_cpu_allowed(current, &cpus_allowed);
++			get_tsk_cpu_allowed(current, &cpus_allowed);
++		}
+ 
+ 		for_each_cpu_and(i, cpu_possible_mask, &cpus_allowed)
+ 			nr_runnable += task_ca_running(current, i);
+-- 
+1.7.1
+

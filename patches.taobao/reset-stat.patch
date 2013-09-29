@@ -1,0 +1,107 @@
+From: Sha Zhengju <handai.szj@taobao.com>
+Subject: Reset the per cpu stat while moving in a cpu by cpuset
+Patch-mainline: t4 in-house
+References: 
+
+If cpuset.cpus is changed frequently, the instance /proc/stat data
+may be thrashing which will bring trouble to some data monitors.
+So we clear the responding cpu stat data while moving in a cpu to
+avoid accounting its left cpu stat.
+
+What's more, we only record idle/ioait/steal base data while a
+cpuacct cgroup is created. But if a new cpu is moving in, we should
+record the current data as base line other than the time of being
+created. So we fix it here too.
+
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+Index: linux-2.6.32-220.17.1.el5/kernel/cpuset.c
+===================================================================
+--- linux-2.6.32-220.17.1.el5.orig/kernel/cpuset.c	2012-12-07 16:24:21.000000000 +0800
++++ linux-2.6.32-220.17.1.el5/kernel/cpuset.c	2012-12-07 16:55:31.000000000 +0800
+@@ -59,6 +59,13 @@
+ #include <linux/mutex.h>
+ #include <linux/workqueue.h>
+ #include <linux/cgroup.h>
++#include <linux/kernel_stat.h>
++
++#ifdef CONFIG_CGROUP_CPUACCT
++extern struct kernel_cpustat *cgroup_ca_kcpustat_ptr(struct cgroup*, int);
++#else
++struct kernel_cpustat *cgroup_ca_kcpustat_ptr(struct cgroup*, int) { return NULL; }
++#endif
+ 
+ /*
+  * Tracks how many cpusets are currently defined in system.
+@@ -853,6 +860,7 @@
+ 	struct ptr_heap heap;
+ 	int retval;
+ 	int is_load_balanced;
++	struct cpumask new_added;
+ 
+ 	/* top_cpuset.cpus_allowed tracks cpu_online_map; it's read-only */
+ 	if (cs == &top_cpuset)
+@@ -888,6 +896,44 @@
+ 
+ 	is_load_balanced = is_sched_load_balance(trialcs);
+ 
++#ifdef CONFIG_CGROUP_CPUACCT
++	if (likely(cpuacct_subsys.active)) {
++		struct cgroup *cgrp;
++		int i;
++
++		memset(&new_added, 0, sizeof(new_added));
++		/* new_added = new - old = new & (~old) */
++		cpumask_andnot(&new_added, trialcs->cpus_allowed, cs->cpus_allowed);
++		if (!cpumask_empty(&new_added)) {
++			cgrp = cs->css.cgroup;
++			if (cgroup_subsys_state(cgrp, cpuacct_subsys_id)) {
++				struct kernel_cpustat *kcpustat;
++				for_each_cpu_and(i, cpu_possible_mask, &new_added) {
++					kcpustat = cgroup_ca_kcpustat_ptr(cgrp, i);
++					kcpustat->cpustat[CPUTIME_IDLE_BASE] =
++						kcpustat_cpu(i).cpustat[CPUTIME_IDLE];
++					kcpustat->cpustat[CPUTIME_IOWAIT_BASE] =
++						kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT];
++					kcpustat->cpustat[CPUTIME_STEAL_BASE] =
++						kcpustat_cpu(i).cpustat[CPUTIME_USER]
++						+ kcpustat_cpu(i).cpustat[CPUTIME_NICE]
++						+ kcpustat_cpu(i).cpustat[CPUTIME_SYSTEM]
++						+ kcpustat_cpu(i).cpustat[CPUTIME_IRQ]
++						+ kcpustat_cpu(i).cpustat[CPUTIME_SOFTIRQ]
++						+ kcpustat_cpu(i).cpustat[CPUTIME_GUEST];
++
++					kcpustat->cpustat[CPUTIME_USER] = 0;
++					kcpustat->cpustat[CPUTIME_SYSTEM] = 0;
++					kcpustat->cpustat[CPUTIME_NICE] = 0;
++					kcpustat->cpustat[CPUTIME_IRQ] = 0;
++					kcpustat->cpustat[CPUTIME_SOFTIRQ] = 0;
++					kcpustat->cpustat[CPUTIME_GUEST] = 0;
++				}
++			}
++		}
++	}
++#endif
++
+ 	mutex_lock(&callback_mutex);
+ 	cpumask_copy(cs->cpus_allowed, trialcs->cpus_allowed);
+ 	mutex_unlock(&callback_mutex);
+Index: linux-2.6.32-220.17.1.el5/kernel/sched.c
+===================================================================
+--- linux-2.6.32-220.17.1.el5.orig/kernel/sched.c	2012-12-07 16:31:11.000000000 +0800
++++ linux-2.6.32-220.17.1.el5/kernel/sched.c	2012-12-07 16:56:56.000000000 +0800
+@@ -11874,6 +11874,13 @@
+ 			    struct cpuacct, css);
+ }
+ 
++struct kernel_cpustat *cgroup_ca_kcpustat_ptr(struct cgroup *cgrp, int cpu)
++{
++	struct cpuacct *ca;
++
++	ca = cgroup_ca(cgrp);
++	return per_cpu_ptr(ca->cpustat, cpu);
++}
+ 
+ /* create a new cpu accounting group */
+ static struct cgroup_subsys_state *cpuacct_create(

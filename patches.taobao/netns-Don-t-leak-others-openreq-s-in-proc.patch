@@ -1,0 +1,29 @@
+From: Pavel Emelyanov <xemul@parallels.com>
+Subject: [PATCH] netns: Don't leak others' openreq-s in proc
+Patch-mainline: yes
+References: 
+
+
+The /proc/net/tcp leaks openreq sockets from other namespaces.
+
+Signed-off-by: Pavel Emelyanov <xemul@parallels.com>
+Signed-off-by: David S. Miller <davem@davemloft.net>
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/net/ipv4/tcp_ipv4.c b/net/ipv4/tcp_ipv4.c
+index af57472..ad96c83 100644
+
+Acked-by: 
+
+--- a/net/ipv4/tcp_ipv4.c
++++ b/net/ipv4/tcp_ipv4.c
+@@ -1964,7 +1964,9 @@ get_req:
+ 	}
+ get_sk:
+ 	sk_nulls_for_each_from(sk, node) {
+-		if (sk->sk_family == st->family && net_eq(sock_net(sk), net)) {
++		if (!net_eq(sock_net(sk), net))
++			continue;
++		if (sk->sk_family == st->family) {
+ 			cur = sk;
+ 			goto out;
+ 		}

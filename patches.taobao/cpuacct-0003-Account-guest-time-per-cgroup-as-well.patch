@@ -1,0 +1,98 @@
+From f8dc2cefeb7578a5afd195b7c26421b94dc3eed0 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Fri, 1 Jun 2012 18:13:55 +0800
+Subject: [PATCH 3/9] Account guest time per-cgroup as well
+Patch-mainline: never
+References: 
+
+We already track multiple tick statistics per-cgroup, using
+the task_group_account_field facility. This patch accounts
+guest_time in that manner as well.
+
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ kernel/sched.c |   45 ++++++++++++++++++++++++++++++++++++++-------
+ 1 files changed, 38 insertions(+), 7 deletions(-)
+
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 5fa34a2..1d769f3 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5578,11 +5578,6 @@ void account_user_time(struct task_struct *p, cputime_t cputime,
+ static void account_guest_time(struct task_struct *p, cputime_t cputime,
+ 			       cputime_t cputime_scaled)
+ {
+-	u64 tmp;
+-	u64 *cpustat = kcpustat_this_cpu->cpustat;
+-
+-	tmp = cputime_to_cputime64(cputime);
+-
+ 	/* Add guest time to process. */
+ 	p->utime = cputime_add(p->utime, cputime);
+ 	p->utimescaled = cputime_add(p->utimescaled, cputime_scaled);
+@@ -5590,8 +5585,8 @@ static void account_guest_time(struct task_struct *p, cputime_t cputime,
+ 	p->gtime = cputime_add(p->gtime, cputime);
+ 
+ 	/* Add guest time to cpustat. */
+-	cpustat[CPUTIME_USER] += tmp;
+-	cpustat[CPUTIME_GUEST] += tmp;
++	task_group_account_field(p, CPUTIME_USER, (__force u64) cputime);
++	task_group_account_field(p, CPUTIME_GUEST, (__force u64) cputime);
+ }
+ 
+ /*
+@@ -11647,6 +11642,38 @@ static int cpuacct_stats_show(struct cgroup *cgrp, struct cftype *cft,
+ 	return 0;
+ }
+ 
++static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
++					struct cgroup_map_cb *cb)
++{
++	struct cpuacct *ca = cgroup_ca(cgrp);
++	u64 user, nice, system, idle, iowait, irq, softirq, steal, guest;
++	int cpu;
++	struct kernel_cpustat *kcpustat;
++
++	user = nice = system = idle = iowait =
++		irq = softirq = steal = guest = 0;
++
++	for_each_online_cpu(cpu) {
++		kcpustat = per_cpu_ptr(ca->cpustat, cpu);
++		user += kcpustat->cpustat[CPUTIME_USER];
++		nice += kcpustat->cpustat[CPUTIME_NICE];
++		system += kcpustat->cpustat[CPUTIME_SYSTEM];
++		irq += kcpustat->cpustat[CPUTIME_IRQ];
++		softirq += kcpustat->cpustat[CPUTIME_SOFTIRQ];
++		guest += kcpustat->cpustat[CPUTIME_GUEST];
++	}
++
++	cb->fill(cb, "user", cputime64_to_clock_t(user));
++	cb->fill(cb, "nice", cputime64_to_clock_t(nice));
++	cb->fill(cb, "system", cputime64_to_clock_t(system));
++	cb->fill(cb, "irq", cputime64_to_clock_t(irq));
++	cb->fill(cb, "softirq", cputime64_to_clock_t(softirq));
++	cb->fill(cb, "guest", cputime64_to_clock_t(guest));
++
++	return 0;
++}
++
++
+ static struct cftype files[] = {
+ 	{
+ 		.name = "usage",
+@@ -11661,6 +11688,10 @@ static struct cftype files[] = {
+ 		.name = "stat",
+ 		.read_map = cpuacct_stats_show,
+ 	},
++	{
++		.name = "proc_stat",
++		.read_map = cpuacct_stats_proc_show,
++	},
+ };
+ 
+ static int cpuacct_populate(struct cgroup_subsys *ss, struct cgroup *cgrp)
+-- 
+1.7.1
+

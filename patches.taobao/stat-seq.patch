@@ -1,0 +1,42 @@
+From: Sha Zhengju <handai.szj@taobao.com>
+Subject: [PATCH] sched: Make cpu numbers of instance /proc/stat sequential
+Patch-mainline: never
+References: 
+
+
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+diff --git a/fs/proc/stat.c b/fs/proc/stat.c
+index 16b8b10..724c8fc 100644
+
+Acked-by: 
+
+--- a/fs/proc/stat.c
++++ b/fs/proc/stat.c
+@@ -66,7 +66,7 @@ u64 get_iowait_time(int cpu)
+ 
+ static int show_stat(struct seq_file *p, void *v)
+ {
+-	int i, j;
++	int i, j, seq = 0;
+ 	unsigned long jif;
+ 	u64 user, nice, system, idle, iowait, irq, softirq, steal;
+ 	u64 guest;
+@@ -207,7 +207,7 @@ static int show_stat(struct seq_file *p, void *v)
+ 
+ 			seq_printf(p,
+ 			"cpu%d %llu %llu %llu %llu %llu %llu %llu %llu %llu\n",
+-			i,
++			seq,
+ 			(unsigned long long)cputime64_to_clock_t(user),
+ 			(unsigned long long)cputime64_to_clock_t(nice),
+ 			(unsigned long long)cputime64_to_clock_t(system),
+@@ -217,6 +217,9 @@ static int show_stat(struct seq_file *p, void *v)
+ 			(unsigned long long)cputime64_to_clock_t(softirq),
+ 			(unsigned long long)cputime64_to_clock_t(steal),
+ 			(unsigned long long)cputime64_to_clock_t(guest));
++
++			seq ++;
++
+ 		}
+ 	} else {
+ 		for_each_online_cpu(i) {

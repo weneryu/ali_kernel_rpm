@@ -1,0 +1,78 @@
+From: Charles Wang <muming.wq@taobao.com>
+Subject: Fix /proc/uptime in T4 container
+References: 
+Patch-mainline: never
+
+In T4 kernel, /proc/uptime shows in linux container is now physical machine's.
+So that commands such as uptime, top, w, show wrong uptime to users.
+
+This patch uses init task's start_time in container to calculate the uptime 
+for linux container, and also corrects the idletime.
+
+Signed-off-by: Charles Wang <muming.wq@taobao.com>
+Acked-by: 
+
+Index: kernel-cg/fs/proc/uptime.c
+===================================================================
+--- kernel-cg.orig/fs/proc/uptime.c     2012-11-27 14:28:43.000000000 +0800
++++ kernel-cg/fs/proc/uptime.c  2012-11-30 16:46:27.000000000 +0800
+@@ -5,20 +5,59 @@
+ #include <linux/seq_file.h>
+ #include <linux/time.h>
+ #include <linux/kernel_stat.h>
++#include <linux/pid_namespace.h>
+ #include <asm/cputime.h>
+
++#ifdef CONFIG_CGROUP_CPUACCT
++extern struct kernel_cpustat *task_ca_kcpustat_ptr(struct task_struct*, int);
++extern bool task_in_nonroot_cpuacct(struct task_struct *);
++#else
++bool task_in_nonroot_cpuacct(struct task_struct *tsk)
++{
++	return false;
++}
++
++struct kernel_cpustat *task_ca_kcpustat_ptr(struct task_struct*, int)
++{
++	return NULL;
++}
++#endif
++
+ static int uptime_proc_show(struct seq_file *m, void *v)
+ {
+ 	struct timespec uptime;
+ 	struct timespec idle;
+ 	int i;
+ 	u64 idletime = 0;
++	struct task_struct *init_tsk;
++	struct kernel_cpustat *kcpustat;
+ 
+ 	for_each_possible_cpu(i)
+ 		idletime += kcpustat_cpu(i).cpustat[CPUTIME_IDLE];
+ 
+ 	do_posix_clock_monotonic_gettime(&uptime);
+ 	monotonic_to_bootbased(&uptime);
++
++	/* instance view in container */
++	if (in_noninit_pid_ns(current->nsproxy->pid_ns) &&
++		task_in_nonroot_cpuacct(current)) {
++		for_each_possible_cpu(i) {
++			kcpustat = task_ca_kcpustat_ptr(current, i);
++			/*
++			 * Cause that CPUs set to this namespace may be changed,
++			 * the real idle for this namespace is complicated.
++			 *
++			 * Just count the global idletime after this namespace 
++			 * starts. When namespace is idle, but in global
++			 * there still have tasks running, the idle won't be
++			 * calculated in.
++			 */
++			idletime -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
++		}
++		init_tsk = current->nsproxy->pid_ns->child_reaper;
++		uptime = timespec_sub(uptime, init_tsk->start_time);
++	}
++
+ 	cputime_to_timespec(idletime, &idle);
+ 	seq_printf(m, "%lu.%02lu %lu.%02lu\n",
+ 			(unsigned long) uptime.tv_sec,

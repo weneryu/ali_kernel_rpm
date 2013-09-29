@@ -1,0 +1,51 @@
+Subject: Perf: always kill perf under global OOM happens
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline: never
+References: 
+
+Since perf never releases its symbol buffer during its life
+cycle, it tends to be the bad guy who caused global OOM. It's
+safe to just commit sucide in this case.
+
+Singed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/tools/perf/perf.c b/tools/perf/perf.c
+index 5f03aaf..b292127 100644
+
+Acked-by: 
+Signed-off-by: 
+
+--- a/tools/perf/perf.c
++++ b/tools/perf/perf.c
+@@ -426,6 +426,21 @@ static void get_debugfs_mntpt(void)
+ 		debugfs_mntpt[0] = '\0';
+ }
+ 
++static int adj_oom_score(void)
++{
++	int fd = 0;
++	int ret = 0;
++	const char *high_oom_score = "15";
++	fd = open("/proc/self/oom_adj", O_WRONLY);
++	if (fd < 0)
++		return 1;
++	ret = write(fd, high_oom_score, strlen(high_oom_score));
++	if (ret < 0)
++		return 1;
++	close(fd);
++	return 0;
++}
++
+ int main(int argc, const char **argv)
+ {
+ 	const char *cmd;
+@@ -433,6 +448,10 @@ int main(int argc, const char **argv)
+ 	cmd = perf_extract_argv0_path(argv[0]);
+ 	if (!cmd)
+ 		cmd = "perf-help";
++	if(adj_oom_score())
++		die("Cannot adjust my oom_adj, pls make sure you are root \
++				or have CAP_SYS_RESOURCE");
++
+ 	/* get debugfs mount point from /proc/mounts */
+ 	get_debugfs_mntpt();
+ 	/*

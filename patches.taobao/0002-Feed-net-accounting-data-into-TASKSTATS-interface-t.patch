@@ -1,0 +1,60 @@
+From: Li Yu <bingtian.ly@taobao.com>
+Subject: [PATCH 2/2] Feed net accounting data into TASKSTATS interface, therefore iotop is able use them
+Patch-mainline: in-house
+References: 
+
+Signed-off-by: Li Yu <bingtian.ly@taobao.com>
+Acked-by: 
+
+---
+This patch doesn't need to be rebased.
+
+ include/linux/taskstats.h |    7 ++++++-
+ kernel/taskstats.c        |    6 ++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+
+--- a/include/linux/taskstats.h
++++ b/include/linux/taskstats.h
+@@ -33,7 +33,7 @@
+  */
+ 
+ 
+-#define TASKSTATS_VERSION	7
++#define TASKSTATS_VERSION	99
+ #define TS_COMM_LEN		32	/* should be >= TASK_COMM_LEN
+ 					 * in linux/sched.h */
+ 
+@@ -163,6 +163,11 @@
+ 	/* Delay waiting for memory reclaim */
+ 	__u64	freepages_count;
+ 	__u64	freepages_delay_total;
++	/* version 7 ends here */
++
++	/* Net accounting */
++	__u64	rx_bytes;
++	__u64	tx_bytes;
+ };
+ 
+ 
+--- a/kernel/taskstats.c
++++ b/kernel/taskstats.c
+@@ -211,6 +211,9 @@
+ 	/* fill in extended acct fields */
+ 	xacct_add_tsk(stats, tsk);
+ 
++	stats->rx_bytes = tsk->rx_bytes;
++	stats->tx_bytes = tsk->tx_bytes;
++
+ 	/* Define err: label here if needed */
+ 	put_task_struct(tsk);
+ 	return rc;
+@@ -254,6 +257,9 @@
+ 
+ 		stats->nvcsw += tsk->nvcsw;
+ 		stats->nivcsw += tsk->nivcsw;
++
++		stats->rx_bytes += tsk->rx_bytes;
++		stats->tx_bytes += tsk->tx_bytes;
+ 	} while_each_thread(first, tsk);
+ 
+ 	unlock_task_sighand(first, &flags);

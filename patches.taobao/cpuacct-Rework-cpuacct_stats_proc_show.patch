@@ -1,0 +1,150 @@
+From 085021cb832ef2dc5e0edbaadeab9f6d3dba77f2 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Wed, 6 Jun 2012 15:32:29 +0800
+Subject: [PATCH] Rework cpuacct_stats_proc_show code while exporting per-cgroup data to cpuacct.proc_stat
+Patch-mainline: in-house 
+References: 
+
+1. If cpuacct is root_cpuacct, we get idle/iowait/steal data through global kernel_cpustat
+directly without IDLE/IOWAIT/STEAL_BASE based computing. This can avoid additional calculations
+and can keep consistant with /proc/stat.
+2. Exporting per-cgroup nr_runnning/uninterruptible.
+
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ fs/proc/stat.c |    4 ++--
+ kernel/sched.c |   53 ++++++++++++++++++++++++++++-------------------------
+ 2 files changed, 30 insertions(+), 27 deletions(-)
+
+diff --git a/fs/proc/stat.c b/fs/proc/stat.c
+index d98106d..16b8b10 100644
+--- a/fs/proc/stat.c
++++ b/fs/proc/stat.c
+@@ -37,7 +37,7 @@ struct kernel_cpustat *task_ca_kcpustat_ptr(struct task_struct*, int) { return N
+ unsigned long task_ca_running(struct task_struct *, int) { return 0; }
+ #endif
+ 
+-static u64 get_idle_time(int cpu)
++u64 get_idle_time(int cpu)
+ {
+ 	u64 idle, idle_time = get_cpu_idle_time_us(cpu, NULL);
+ 
+@@ -51,7 +51,7 @@ static u64 get_idle_time(int cpu)
+ 	return idle;
+ }
+ 
+-static u64 get_iowait_time(int cpu)
++u64 get_iowait_time(int cpu)
+ {
+ 	u64 iowait, iowait_time = get_cpu_iowait_time_us(cpu, NULL);
+ 
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 357b991..d1dd453 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -11949,6 +11949,9 @@ static int cpuacct_stats_show(struct cgroup *cgrp, struct cftype *cft,
+ #define LOAD_INT(x) ((x) >> FSHIFT)
+ #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
+ 
++extern u64 get_idle_time(int);
++extern u64 get_iowait_time(int);
++
+ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 					struct cgroup_map_cb *cb)
+ {
+@@ -11956,8 +11959,9 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 	u64 user, nice, system, idle, iowait, irq, softirq, steal, guest, load;
+ 	int cpu;
+ 	struct kernel_cpustat *kcpustat;
+-	cpumask_var_t cpus_allowed;
++	struct cpumask cpus_allowed;
+ 	unsigned long avnrun[3];
++	unsigned long nr_run = 0, nr_uninter = 0, *nrptr = NULL;
+ 
+ 	user = nice = system = idle = iowait =
+ 		irq = softirq = steal = guest = load = 0;
+@@ -11972,16 +11976,20 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 		guest += kcpustat->cpustat[CPUTIME_GUEST];
+ 	}
+ 
++	cpumask_copy(&cpus_allowed, cpu_online_mask);
+ 	if (cgroup_subsys_state(cgrp, cpuset_subsys_id)) {
+-		cpus_allowed = get_cs_cpu_allowed(cgrp);
+-		for_each_cpu_and(cpu, cpu_online_mask, cpus_allowed) {
++		memset(&cpus_allowed, 0, sizeof(cpus_allowed));
++		cpumask_copy(&cpus_allowed, get_cs_cpu_allowed(cgrp));
++	}
++	if (ca != &root_cpuacct) {
++		for_each_cpu_and(cpu, cpu_online_mask, &cpus_allowed) {
+ 			kcpustat = per_cpu_ptr(ca->cpustat, cpu);
+ 			idle += kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE];
+ 			idle += arch_idle_time(cpu);
+ 			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
+ 			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
+ 			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
+-			steal = kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
++			steal += kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
+ 				- kcpustat->cpustat[CPUTIME_USER]
+ 				+ kcpustat_cpu(cpu).cpustat[CPUTIME_NICE]
+ 				- kcpustat->cpustat[CPUTIME_NICE]
+@@ -11997,32 +12005,25 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 		}
+ 	} else {
+ 		for_each_online_cpu(cpu) {
+-			kcpustat = per_cpu_ptr(ca->cpustat, cpu);
+-			idle += kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE];
+-			idle += arch_idle_time(cpu);
+-			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
+-			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
+-			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
+-			steal = kcpustat_cpu(cpu).cpustat[CPUTIME_USER]
+-				- kcpustat->cpustat[CPUTIME_USER]
+-				+ kcpustat_cpu(cpu).cpustat[CPUTIME_NICE]
+-				- kcpustat->cpustat[CPUTIME_NICE]
+-				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SYSTEM]
+-				- kcpustat->cpustat[CPUTIME_SYSTEM]
+-				+ kcpustat_cpu(cpu).cpustat[CPUTIME_IRQ]
+-				- kcpustat->cpustat[CPUTIME_IRQ]
+-				+ kcpustat_cpu(cpu).cpustat[CPUTIME_SOFTIRQ]
+-				- kcpustat->cpustat[CPUTIME_SOFTIRQ]
+-				+ kcpustat_cpu(cpu).cpustat[CPUTIME_GUEST]
+-				- kcpustat->cpustat[CPUTIME_GUEST]
+-				- kcpustat->cpustat[CPUTIME_STEAL_BASE];
++			idle += get_idle_time(cpu);
++			iowait += get_iowait_time(cpu);
++			steal += kcpustat_cpu(cpu).cpustat[CPUTIME_STEAL];
+ 		}
+ 	}
+ 
+-	if (ca != &root_cpuacct)
++	if (ca != &root_cpuacct) {
+ 		get_cgroup_avenrun(ca, avnrun, FIXED_1/200, 0);
+-	else
++		for_each_cpu_and(cpu, cpu_online_mask, &cpus_allowed) {
++			nrptr = per_cpu_ptr(ca->nr_running, cpu);
++			nr_run += *nrptr;
++			nrptr = per_cpu_ptr(ca->nr_uninterruptible, cpu);
++			nr_uninter += *nrptr;
++		}
++	} else {
+ 		get_avenrun(avnrun, FIXED_1/200, 0);
++		nr_run = nr_running();
++		nr_uninter = nr_uninterruptible();
++	}
+ 
+ 	cb->fill(cb, "user", cputime64_to_clock_t(user));
+ 	cb->fill(cb, "nice", cputime64_to_clock_t(nice));
+@@ -12040,6 +12041,8 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 	cb->fill(cb, "load average(5min)", load);
+ 	load = LOAD_INT(avnrun[2]) * 100 + LOAD_FRAC(avnrun[2]);
+ 	cb->fill(cb, "load average(15min)", load);
++	cb->fill(cb, "nr_running", (u64)nr_run);
++	cb->fill(cb, "nr_uninterrupible", (u64)nr_uninter);
+ 
+ 	return 0;
+ }
+-- 
+1.7.1
+

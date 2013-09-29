@@ -1,0 +1,151 @@
+From a9de97831e119309c57dc154aa593ad21ba09035 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Fri, 1 Jun 2012 18:12:19 +0800
+Subject: [PATCH 4/9] Compute group's idle/iowait time
+Patch-mainline: never
+References: 
+
+When a group is created, we records the per-cpu idle/iowait time as
+baseline. The cgroup's idle/iowait time equals the gap between
+current system value and the baseline. So the group's value reflects
+the real system situation.
+
+The affinity cpus setted by cpuset controller are also considered.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ include/linux/cpuset.h      |    1 +
+ include/linux/kernel_stat.h |    2 ++
+ kernel/cpuset.c             |    6 ++++++
+ kernel/sched.c              |   38 ++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 47 insertions(+), 0 deletions(-)
+
+diff --git a/include/linux/cpuset.h b/include/linux/cpuset.h
+index 457ed76..bea785f 100644
+--- a/include/linux/cpuset.h
++++ b/include/linux/cpuset.h
+@@ -23,6 +23,7 @@ extern void cpuset_init_smp(void);
+ extern void cpuset_cpus_allowed(struct task_struct *p, struct cpumask *mask);
+ extern int cpuset_cpus_allowed_fallback(struct task_struct *p);
+ extern nodemask_t cpuset_mems_allowed(struct task_struct *p);
++extern cpumask_var_t get_cs_cpu_allowed(struct cgroup *cgrp);
+ #define cpuset_current_mems_allowed (current->mems_allowed)
+ void cpuset_init_current_mems_allowed(void);
+ int cpuset_nodemask_valid_mems_allowed(nodemask_t *nodemask);
+diff --git a/include/linux/kernel_stat.h b/include/linux/kernel_stat.h
+index acf5cde..6383912 100644
+--- a/include/linux/kernel_stat.h
++++ b/include/linux/kernel_stat.h
+@@ -23,7 +23,9 @@ enum cpu_usage_stat {
+ 	CPUTIME_SOFTIRQ,
+ 	CPUTIME_IRQ,
+ 	CPUTIME_IDLE,
++	CPUTIME_IDLE_BASE,
+ 	CPUTIME_IOWAIT,
++	CPUTIME_IOWAIT_BASE,
+ 	CPUTIME_STEAL,
+ 	CPUTIME_GUEST,
+ 	NR_STATS,
+diff --git a/kernel/cpuset.c b/kernel/cpuset.c
+index f8b2132..8d9ebad 100644
+--- a/kernel/cpuset.c
++++ b/kernel/cpuset.c
+@@ -108,6 +108,12 @@ static inline struct cpuset *cgroup_cs(struct cgroup *cont)
+ 			    struct cpuset, css);
+ }
+ 
++cpumask_var_t get_cs_cpu_allowed(struct cgroup *cgrp)
++{
++	struct cpuset *cs = cgroup_cs(cgrp);
++	return cs->cpus_allowed;
++}
++
+ /* Retrieve the cpuset for a task */
+ static inline struct cpuset *task_cs(struct task_struct *task)
+ {
+diff --git a/kernel/sched.c b/kernel/sched.c
+index 1d769f3..58248de 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -11486,6 +11486,8 @@ static struct cgroup_subsys_state *cpuacct_create(
+ 	struct cgroup_subsys *ss, struct cgroup *cgrp)
+ {
+ 	struct cpuacct *ca;
++	int i;
++	struct kernel_cpustat *kcpustat;
+ 
+ 	if (!cgrp->parent)
+ 		return &root_cpuacct.css;
+@@ -11505,6 +11507,14 @@ static struct cgroup_subsys_state *cpuacct_create(
+ 	if (cgrp->parent)
+ 		ca->parent = cgroup_ca(cgrp->parent);
+ 
++	for_each_possible_cpu(i) {
++		kcpustat = per_cpu_ptr(ca->cpustat, i);
++		kcpustat->cpustat[CPUTIME_IDLE_BASE] =
++					kcpustat_cpu(i).cpustat[CPUTIME_IDLE];
++		kcpustat->cpustat[CPUTIME_IOWAIT_BASE] =
++					kcpustat_cpu(i).cpustat[CPUTIME_IOWAIT];
++	}
++
+ 	return &ca->css;
+ 
+ out_free_cpuusage:
+@@ -11642,6 +11652,10 @@ static int cpuacct_stats_show(struct cgroup *cgrp, struct cftype *cft,
+ 	return 0;
+ }
+ 
++#ifndef arch_idle_time
++#define arch_idle_time(cpu) 0
++#endif
++
+ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 					struct cgroup_map_cb *cb)
+ {
+@@ -11649,6 +11663,7 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 	u64 user, nice, system, idle, iowait, irq, softirq, steal, guest;
+ 	int cpu;
+ 	struct kernel_cpustat *kcpustat;
++	cpumask_var_t cpus_allowed;
+ 
+ 	user = nice = system = idle = iowait =
+ 		irq = softirq = steal = guest = 0;
+@@ -11663,9 +11678,32 @@ static int cpuacct_stats_proc_show(struct cgroup *cgrp, struct cftype *cft,
+ 		guest += kcpustat->cpustat[CPUTIME_GUEST];
+ 	}
+ 
++	if (cgroup_subsys_state(cgrp, cpuset_subsys_id)) {
++		cpus_allowed = get_cs_cpu_allowed(cgrp);
++		for_each_cpu_and(cpu, cpu_online_mask, cpus_allowed) {
++			kcpustat = per_cpu_ptr(ca->cpustat, cpu);
++			idle += kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE];
++			idle += arch_idle_time(cpu);
++			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
++			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
++			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
++		}
++	} else {
++		for_each_online_cpu(cpu) {
++			kcpustat = per_cpu_ptr(ca->cpustat, cpu);
++			idle += kcpustat_cpu(cpu).cpustat[CPUTIME_IDLE];
++			idle += arch_idle_time(cpu);
++			idle -= kcpustat->cpustat[CPUTIME_IDLE_BASE];
++			iowait += kcpustat_cpu(cpu).cpustat[CPUTIME_IOWAIT];
++			iowait -= kcpustat->cpustat[CPUTIME_IOWAIT_BASE];
++		}
++	}
++
+ 	cb->fill(cb, "user", cputime64_to_clock_t(user));
+ 	cb->fill(cb, "nice", cputime64_to_clock_t(nice));
+ 	cb->fill(cb, "system", cputime64_to_clock_t(system));
++	cb->fill(cb, "idle", cputime64_to_clock_t(idle));
++	cb->fill(cb, "iowait", cputime64_to_clock_t(iowait));
+ 	cb->fill(cb, "irq", cputime64_to_clock_t(irq));
+ 	cb->fill(cb, "softirq", cputime64_to_clock_t(softirq));
+ 	cb->fill(cb, "guest", cputime64_to_clock_t(guest));
+-- 
+1.7.1
+

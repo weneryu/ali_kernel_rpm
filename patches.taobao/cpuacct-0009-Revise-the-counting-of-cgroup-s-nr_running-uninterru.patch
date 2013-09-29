@@ -1,0 +1,193 @@
+From fd0abe5a652f4d421e481b7cce766b9267e85a97 Mon Sep 17 00:00:00 2001
+From: Sha Zhengju (handai) <handai.szj@taobao.com>
+Date: Fri, 1 Jun 2012 17:44:41 +0800
+Subject: [PATCH 9/9] Revise the counting of cgroup's nr_running/uninterruptible
+Patch-mainline: never
+References: 
+
+In the previous commit: d3285b04, there are still problems under two circumstances:
+First, when a process is exiting, its cgroup pointers are erased before deactivete_task
+(so before dec_nr_running), so the cgroup's nr_running will have no time to dec.
+We solve this by adding cpuacct_exit, a cpuacct exit callback in do_exit(cgroup_exit).
+In cpuacct_exit, the coresponding cgroup's nr_runnung/uninterruptible will be
+revised.
+Secondly, there's also a problem while attaching process from a cgroup to another one.
+If the process has contribution to old cgroup's nr_running/uninterruptible, we should
+correct the numbers both in the old and new cgroup before moving.
+The calltrace of moving is: can_attach(1)->modify cgroup pointer(2)->attach(3). We can
+correct the numbers in attach(3), but there's a small window between modify cgroup
+pointer(2) and attach(3) which may lead to new cgroup's number be negative. So we
+save the old cgroup in can_attach, and make the possible changing between (2) and (3)
+still towards the old one.
+
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Signed-off-by: Sha Zhengju <handai.szj@taobao.com>
+Acked-by: 
+
+---
+ include/linux/sched.h |    3 ++
+ kernel/fork.c         |    3 ++
+ kernel/sched.c        |   95 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 101 insertions(+), 0 deletions(-)
+
+diff --git a/include/linux/sched.h b/include/linux/sched.h
+index 4a62bb5..038e905 100644
+--- a/include/linux/sched.h
++++ b/include/linux/sched.h
+@@ -1560,6 +1560,9 @@ struct task_struct {
+ 	int cpuset_slab_spread_rotor;
+ #endif
+ #endif
++#ifdef CONFIG_CGROUP_CPUACCT
++    struct cpuacct *old_ca;
++#endif
+ #ifdef CONFIG_CGROUPS
+ 	/* Control Group info protected by css_set_lock */
+ 	struct css_set *cgroups;
+diff --git a/kernel/fork.c b/kernel/fork.c
+index 71bb6e2..adc4f1c 100644
+--- a/kernel/fork.c
++++ b/kernel/fork.c
+@@ -1119,6 +1119,9 @@ static struct task_struct *copy_process(unsigned long clone_flags,
+ 	p->io_context = NULL;
+ 	p->audit_context = NULL;
+ 	cgroup_fork(p);
++#ifdef CONFIG_CGROUP_CPUSTAT
++	p->old_ca = NULL;
++#endif
+ #ifdef CONFIG_NUMA
+ 	p->mempolicy = mpol_dup(p->mempolicy);
+  	if (IS_ERR(p->mempolicy)) {
+diff --git a/kernel/sched.c b/kernel/sched.c
+index c0471f9..357b991 100644
+--- a/kernel/sched.c
++++ b/kernel/sched.c
+@@ -5612,8 +5612,10 @@ static int cpuacct_cgroup_calc_load(struct cpuacct *acct, void *data)
+ 		cpus_allowed = get_cs_cpu_allowed(cgrp);
+ 		for_each_cpu_and(cpu, cpu_online_mask, cpus_allowed) {
+ 			nrptr = per_cpu_ptr(acct->nr_uninterruptible, cpu);
++			WARN_ON_ONCE(*nrptr > cpu_rq(cpu)->nr_uninterruptible);
+ 			active += *nrptr;
+ 			nrptr = per_cpu_ptr(acct->nr_running, cpu);
++			WARN_ON_ONCE(*nrptr > cpu_rq(cpu)->nr_running);
+ 			active += *nrptr;
+ 		}
+ 		active = active > 0 ? active * FIXED_1 : 0;
+@@ -5659,6 +5661,9 @@ void update_cpuacct_nr(struct task_struct *p, int cpu,
+ 
+ 	rcu_read_lock();
+ 	ca = task_ca(p);
++	if (unlikely(p->old_ca))
++		ca = p->old_ca;
++
+ 	if (ca && (ca != &root_cpuacct)) {
+ 		update_cpuacct_uninterruptible(ca, cpu, nr_uninter);
+ 		update_cpuacct_running(ca, cpu, nr_running);
+@@ -11735,6 +11740,92 @@ cpuacct_destroy(struct cgroup_subsys *ss, struct cgroup *cgrp)
+ 	kfree(ca);
+ }
+ 
++static void
++cpuacct_exit(struct cgroup_subsys *ss, struct cgroup *cgrp,
++			struct cgroup *old_cgrp, struct task_struct *tsk)
++{
++	struct rq *rq;
++	unsigned long flags;
++	int cpu = task_cpu(tsk);
++	struct cpuacct *ca = cgroup_ca(old_cgrp);
++
++	if (ca && (ca != &root_cpuacct)) {
++		rq = task_rq_lock(tsk, &flags);
++		if (tsk->se.on_rq)
++			update_cpuacct_running(ca, cpu, -1);
++		else if (task_contributes_to_load(tsk))
++			update_cpuacct_uninterruptible(ca, cpu, -1);
++		tsk->old_ca = &root_cpuacct;
++		task_rq_unlock(rq, &flags);
++	}
++	return;
++}
++
++static int
++cpuacct_can_attach(struct cgroup_subsys *ss, struct cgroup *cont,
++		struct task_struct *tsk, bool threadgroup)
++{
++	struct cpuacct *old_ca = cgroup_ca(cont);
++	struct rq *rq;
++	unsigned long flags;
++	rq = task_rq_lock(tsk, &flags);
++	tsk->old_ca = old_ca;
++	task_rq_unlock(rq, &flags);
++	return 0;
++}
++
++static void
++cpuacct_cancel_attach(struct cgroup_subsys *ss, struct cgroup *cont,
++		struct task_struct *tsk, bool threadgroup)
++{
++	struct rq *rq;
++	unsigned long flags;
++	rq = task_rq_lock(tsk, &flags);
++	tsk->old_ca = NULL;
++	task_rq_unlock(rq, &flags);
++	return;
++}
++
++static void
++cpuacct_attach(struct cgroup_subsys *ss, struct cgroup *cgrp,
++		struct cgroup *old_cont, struct task_struct *tsk,
++		bool threadgroup)
++{
++	struct rq *rq;
++	unsigned long flags;
++	struct cpuacct *src_ca, *dst_ca;
++	int cpu = task_cpu(tsk);
++
++again:
++	/* wait for TASK_WAKEUP completion */
++	while (task_is_waking(tsk))
++		cpu_relax();
++	rq = task_rq_lock(tsk, &flags);
++	if (task_is_waking(tsk)) {
++		task_rq_unlock(rq, &flags);
++		goto again;
++	}
++
++	tsk->old_ca = NULL;
++	src_ca = cgroup_ca(old_cont);
++	dst_ca = cgroup_ca(cgrp);
++	/* a task not on queue must have been deactived */
++	if (dst_ca && dst_ca != &root_cpuacct) {
++		if (tsk->se.on_rq)
++			update_cpuacct_running(dst_ca, cpu, 1);
++		else if (task_contributes_to_load(tsk))
++			update_cpuacct_uninterruptible(dst_ca, cpu, 1);
++	}
++	if (src_ca && src_ca != &root_cpuacct) {
++		if (tsk->se.on_rq)
++			update_cpuacct_running(src_ca, cpu, -1);
++		else if (task_contributes_to_load(tsk))
++			update_cpuacct_uninterruptible(src_ca, cpu, -1);
++	}
++	task_rq_unlock(rq, &flags);
++	return;
++}
++
+ static u64 cpuacct_cpuusage_read(struct cpuacct *ca, int cpu)
+ {
+ 	u64 *cpuusage = per_cpu_ptr(ca->cpuusage, cpu);
+@@ -12010,7 +12101,11 @@ struct cgroup_subsys cpuacct_subsys = {
+ 	.name = "cpuacct",
+ 	.create = cpuacct_create,
+ 	.destroy = cpuacct_destroy,
++	.can_attach = cpuacct_can_attach,
++	.cancel_attach = cpuacct_cancel_attach,
++	.attach = cpuacct_attach,
+ 	.populate = cpuacct_populate,
++        .exit = cpuacct_exit,
+ 	.subsys_id = cpuacct_subsys_id,
+ 	.use_id = 1,
+ };
+-- 
+1.7.1
+

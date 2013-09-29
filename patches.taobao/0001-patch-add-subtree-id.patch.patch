@@ -1,0 +1,120 @@
+Subject: [PATCH 1/4] Quota: add additional owner identifier
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Patch-mainline: never
+References: 
+
+This patch adds subtree inode identifier. Subtree ID may be used as
+auxiliary owner specifier in addition to standard uid/gid.
+
+The min valid subtree id is 1 << 24 = 16777216, i.e the high 6-bits
+in gid space is occupied by subtree id.
+
+Signed-off-by: Dmitry Monakhov <dmonakhov@openvz.org>
+Signed-off-by: Zheng Liu <wenqing.lz@taobao.com>
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+diff --git a/fs/Kconfig b/fs/Kconfig
+index cd55bd5..0683208 100644
+
+Acked-by: 
+
+--- a/fs/Kconfig
++++ b/fs/Kconfig
+@@ -55,6 +55,14 @@ config FILE_LOCKING
+           for filesystems like NFS and for the flock() system
+           call. Disabling this option saves about 11k.
+ 
++config SUBTREE
++	bool "Enable subtree inode identifier"
++	default n
++	help
++	  This option enables subtree inode identifies. Subtree id
++	  may be used as auxiliary owner specifier in addition to
++	  standard uid/gid, such as directory quota.
++
+ source "fs/notify/Kconfig"
+ 
+ source "fs/quota/Kconfig"
+diff --git a/fs/quota/dquot.c b/fs/quota/dquot.c
+index deb21ee..4a2b703 100644
+--- a/fs/quota/dquot.c
++++ b/fs/quota/dquot.c
+@@ -1034,6 +1034,8 @@ static int need_print_warning(struct dquot *dquot)
+ 		case USRQUOTA:
+ 			return current_fsuid() == dquot->dq_id;
+ 		case GRPQUOTA:
++			if (dquot->dq_id >= SBTR_MIN_ID)
++				return 1;
+ 			return in_group_p(dquot->dq_id);
+ 	}
+ 	return 0;
+@@ -1264,7 +1266,25 @@ int dquot_initialize(struct inode *inode, int type)
+ 			id = inode->i_uid;
+ 			break;
+ 		case GRPQUOTA:
+-			id = inode->i_gid;
++			/*
++			 * The default value of ei->i_subtree is 0.
++			 * A valid ei->i_subtree must be bigger than
++			 * SBTR_MIN_ID, ext3_xattr_subtree_set should make sure
++			 * it's valid.
++			 */
++			if (inode->i_sb->s_op->get_subtree) {
++				id = inode->i_sb->s_op->get_subtree(inode);
++				if (!id) {
++					id = inode->i_gid;
++				} else if (id < SBTR_MIN_ID) {
++					printk(KERN_WARNING "Get an invalid "
++						"id(%d) for inode %lu\n",
++						id, inode->i_ino);
++					id = inode->i_gid;
++				}
++			} else {
++				id = inode->i_gid;
++			}
+ 			break;
+ 		}
+ 		got[cnt] = dqget(sb, id, cnt);
+diff --git a/include/linux/fs.h b/include/linux/fs.h
+index 484fb8e..406ae08 100644
+--- a/include/linux/fs.h
++++ b/include/linux/fs.h
+@@ -1657,6 +1657,9 @@ struct super_operations {
+ 	ssize_t (*quota_write)(struct super_block *, int, const char *, size_t, loff_t);
+ #endif
+ 	int (*bdev_try_to_free_page)(struct super_block*, struct page*, gfp_t);
++#ifdef CONFIG_QUOTA
++	u32 (*get_subtree)(const struct inode *inode);
++#endif
+ };
+ 
+ /*
+diff --git a/include/linux/quota.h b/include/linux/quota.h
+index c40c540..bdb7106 100644
+--- a/include/linux/quota.h
++++ b/include/linux/quota.h
+@@ -51,6 +51,11 @@
+ 	"undefined", \
+ };
+ 
++#define SBTR_QUOTA_MASK		0xff000000
++#define SBTR_QUOTA_SHIFT	24
++#define SBTR_MIN_ID		(1 << SBTR_QUOTA_SHIFT)
++#define IS_SBTR_ID(id)  (((id) >= SBTR_MIN_ID || (id) == 0) ? 1 : 0)
++
+ /*
+  * Command definitions for the 'quotactl' system call.
+  * The commands are broken into a main command defined below
+diff --git a/include/linux/xattr.h b/include/linux/xattr.h
+index 5c84af8..a1d1c79 100644
+--- a/include/linux/xattr.h
++++ b/include/linux/xattr.h
+@@ -17,6 +17,9 @@
+ 
+ #include <linux/types.h>
+ 
++#define XATTR_SUBTREE "system.subtree"
++#define XATTR_SUBTREE_LEN (sizeof(XATTR_SUBTREE))
++
+ /* Namespaces */
+ #define XATTR_OS2_PREFIX "os2."
+ #define XATTR_OS2_PREFIX_LEN (sizeof (XATTR_OS2_PREFIX) - 1)

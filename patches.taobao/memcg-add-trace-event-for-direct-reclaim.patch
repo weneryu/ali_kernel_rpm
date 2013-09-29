@@ -1,0 +1,101 @@
+From 21faa6231bdd04422829817f86f291347ffc1a18 Mon Sep 17 00:00:00 2001
+From: Zhu Yanhai <gaoyang.zyh@taobao.com>
+Date: Mon, 4 Jun 2012 17:37:58 +0800
+Subject: [PATCH] Add trace event for memcgroup's direct reclaim
+Patch-mainline: in-house
+References: 
+
+As we have been suspecting that memcgroup's local direct reclaim might
+cause the latency of application, I think it's a good idea to add some
+code to count its real cost.
+
+Acked-by: 
+Signed-off-by: Zhu Yanhai <gaoyang.zyh@taobao.com>
+---
+
+diff --git a/include/trace/events/kmem.h b/include/trace/events/kmem.h
+index 4b43ec9..1e57a9f 100644
+--- a/include/trace/events/kmem.h
++++ b/include/trace/events/kmem.h
+@@ -877,6 +877,44 @@ TRACE_EVENT(mm_vmscan_direct_reclaim_end,
+ 	TP_printk("nr_reclaimed=%lu", __entry->nr_reclaimed)
+ 	);
+ 
++TRACE_EVENT(mm_cgroup_direct_reclaim_begin,
++
++	TP_PROTO(void *memcg, gfp_t gfp_flags),
++
++	TP_ARGS(memcg, gfp_flags),
++
++	TP_STRUCT__entry(
++		__field(        void *,    memcg        )
++		__field(        gfp_t,  gfp_flags       )
++	),
++
++	TP_fast_assign(
++		__entry->memcg          = memcg;
++		__entry->gfp_flags      = gfp_flags;
++	),
++
++	TP_printk("memcg=%p gfp_flags=%s",
++		__entry->memcg,
++		show_gfp_flags(__entry->gfp_flags))
++	);
++
++TRACE_EVENT(mm_cgroup_direct_reclaim_end,
++
++	TP_PROTO(void *memcg),
++
++	TP_ARGS(memcg),
++
++	TP_STRUCT__entry(
++		__field(        void *,  memcg    )
++	),
++
++	TP_fast_assign(
++		__entry->memcg = memcg;
++	),
++
++	TP_printk("memcg=%p", __entry->memcg)
++	);
++
+ TRACE_EVENT(mm_vmscan_lru_isolate,
+ 
+ 	TP_PROTO(int order,
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index 16de778..627d6e0 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -1422,6 +1422,7 @@ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+ 	struct mem_cgroup *mem, *mem_over_limit;
+ 	int nr_retries = MEM_CGROUP_RECLAIM_RETRIES;
+ 	struct res_counter *fail_res;
++	bool direct_reclaimed = false;
+ 
+ 	/*
+ 	 * Unlike gloval-vm's OOM-kill, we're not in memory shortage
+@@ -1476,6 +1477,11 @@ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+ 
+ 		if (!(gfp_mask & __GFP_WAIT))
+ 			goto nomem;
++		if (!direct_reclaimed) {
++			direct_reclaimed = true;
++			trace_mm_cgroup_direct_reclaim_begin((void *)mem, gfp_mask);
++		}
++					
+ 
+ 		mem_cgroup_hierarchical_reclaim(mem_over_limit, NULL,
+ 						gfp_mask, flags);
+@@ -1537,6 +1543,9 @@ static int __mem_cgroup_try_charge(struct mm_struct *mm,
+                 }
+ 
+ 	}
++
++	if (unlikely(direct_reclaimed))
++		trace_mm_cgroup_direct_reclaim_end((void *)mem);
+ 	/*
+ 	 * Insert ancestor (and ancestor's ancestors), to softlimit RB-tree.
+ 	 * if they exceeds softlimit.
+-- 
+1.7.4.1
+
