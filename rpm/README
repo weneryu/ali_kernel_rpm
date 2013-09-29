@@ -1,8 +1,7 @@
 本地编译
+[完整文档请见 http://baike.corp.taobao.com/index.php/SubmittingKernelPatches]
 
-如果你在RHEL5或者CentOS5上面编译，则不需要做任何修改。
-如果你在RHEL6或者CentOS6上面编译，请将6u_config重新命名为config，运行如下命令：
-mv config 5u_config;mv 6u_config config
+[注意]：在编译内核之前，请确定内核代码是维护正确的branch下；如果内核是要运行在RHEL6系列操作系统上，则需要切换到6u的branch下；如果是在RHEL5系列操作系统上运行，则需要切换到5u4的branch下。
 
  scripts/package.py [--buildid {number}]
 这个命令会生成一个叫 taobao-kernel-build 的子目录，里边放置了编译所需的全部文件，在此目录里做rpmbuild即可本地编译生成kernel rpm包。 buildid用来指定生成的RPM包的build number,YUM在安装RPM包时会凭借此序号来判断各个RPM包的新旧(例如,在写作本文时,yum.corp.taobao.com上的内核rpm名是	kernel-2.6.32-95.45a36c6.x86_64.rpm,这表示此RPM为2.6.32内核的第95次build,源码对应于kernel git tree的Commit 45a36c6).如果您只是自己编译使用,则此序号可以随意指定.若没有指定buildid,则默认为1.
@@ -34,5 +33,3 @@ mv config 5u_config;mv 6u_config config
 这表示为了节约编译时间，ABS不需要debuginfo包（暂时没有调试需求），不出debug包（线上不会使用debug内核），不使用dracut来生成/boot/initramfs-xxx（rhel 5u4上根本没有dracut）
 
 后边的若干--define指定了给rpmbuild使用的_rpmdir,_builddir,_sourcedir等环境变量。如果不指定这些rpmbuild默认会去~/rpmbuild目录下找源代码
-
-

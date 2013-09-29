@@ -8,7 +8,7 @@ Epoch: 20
 # and/or a kernel built from an rc or git snapshot, released_kernel should
 # be 0.
 %define released_kernel %%RELEASED_KERNEL%%
-%define dist .el5
+%define dist .el6
 
 # Versions of various parts
 
@@ -113,7 +113,7 @@ fi)
 # Want to build a the vsdo directories installed
 %define with_vdso_install %{?_without_vdso_install: 0} %{?!_without_vdso_install: 1}
 # Use dracut instead of mkinitrd for initrd image generation
-%define with_dracut       %{?_with_dracut:      1} %{?!_with_dracut:       0}
+%define with_dracut       %{?_without_dracut:       0} %{?!_without_dracut:       1}
 
 # Build the kernel-doc package, but don't fail the build if it botches.
 # Here "true" means "continue" and "false" means "fail the build".
@@ -412,7 +412,7 @@ fi)
 %define initrd_prereq  dracut-kernel >= 002-18.git413bcf78
 %else
 %if %{on_rhel5}
-%define initrd_prereq  mkinitrd >= 5.1.19.6-61.tb345
+%define initrd_prereq  mkinitrd
 %else
 %define initrd_prereq  mkinitrd >= 6.0.61-1
 %endif
@@ -890,7 +890,7 @@ done
 find . \( -name "*.orig" -o -name "*~" \) -exec rm -f {} \; >/dev/null
 
 %if %{signmodules}
-cp %{SOURCE19} %{SOURCE9} %{SOURCE10} .
+cp %{SOURCE9} %{SOURCE10} %{SOURCE19} .
 # if there're external keys to be included
 if [ -s %{SOURCE19} ]; then
 	gpg --homedir . --no-default-keyring --keyring kernel.pub --import %{SOURCE19}
@@ -899,7 +899,7 @@ fi
 # Please uncomment below two lines if this tree is public and missing scripts/kernel.sec and scripts/kernel.pub
 # gpg --homedir . --batch --gen-key %{SOURCE11}
 # gpg --homedir . --export --keyring ./kernel.pub Red > extract.pub
-# 
+#
 # Otherwise, given that scripts/kernel.sec and scripts/kernel.pub are exist, we go this way.
 # one for Redhat drivers update programe, one for t4kernel itself
 gpg --homedir . --export --keyring ./kernel.pub Red T4kernel > extract.pub
@@ -1043,11 +1043,11 @@ BuildKernel() {
     if grep '^CONFIG_XEN=y$' .config >/dev/null; then
       echo > ldconfig-kernel.conf "\
 # This directive teaches ldconfig to search in nosegneg subdirectories
-# and cache the DSOs there with extra bit 0 set in their hwcap match
+# and cache the DSOs there with extra bit 1 set in their hwcap match
 # fields.  In Xen guest kernels, the vDSO tells the dynamic linker to
 # search in nosegneg subdirectories and to match this extra hwcap bit
 # in the ld.so.cache file.
-hwcap 0 nosegneg"
+hwcap 1 nosegneg"
     fi
     if [ ! -s ldconfig-kernel.conf ]; then
       echo > ldconfig-kernel.conf "\
